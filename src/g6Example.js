@@ -255,7 +255,6 @@ const graph = new G6.Graph({
       }
     }]
   },
-  fitView: true
 });
 graph.data(data);
 graph.render();

@@ -11,7 +11,7 @@
     #container, #webgpuCanvas {
       border: 1px solid #ccc; /* 可选，方便看到边框 */
     }
-    body {
+    .views {
       display: flex;
       flex-direction: row; /* 横排 */
       align-items: flex-start; /* 顶对齐 */
@@ -21,7 +21,19 @@
   </style>
 </head>
 <body>
-  <div id="container"></div>
-  <canvas id="webgpuCanvas" width="1000" height="1000"></canvas>
+  
+  <div class="views">
+  <div class="panel">
+    <div class="panel-title">G6 实现</div>
+    <div id="container"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">WebGPU 实现</div>
+    <canvas id="webgpuCanvas" width="1000" height="1000"></canvas>
+  </div>
+
+</div>
+  <p class="note">*node数 5802 个，edge 数 9005。WebGPU 使用 G6 graph 布局后的位置数据</p>
 </body>
 </html>
