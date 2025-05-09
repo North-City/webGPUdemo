@@ -487,7 +487,7 @@ function extractDataFromG6(graph, canvas, uvMap) {
         polylines.push(x1, y1, x2, y2);
         arrows.push(x1, y1, x2, y2);
     });
-
+    debugger;
     return {
         rects: new Float32Array(rects),
         polylines: new Float32Array(polylines),
