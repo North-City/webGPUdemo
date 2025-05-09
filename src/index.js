@@ -5,6 +5,8 @@ import { dagreLayout } from "./dagreGenerater";
 
 import './style.css';
 import * as G6 from '@antv/g6';
+import { Renderer as SVGRenderer } from '@antv/g-svg';
+import { Renderer as WebGLRenderer } from '@antv/g-webgl';
 import originData from '../data/data-11W.csv';
 let attrList = originData.shift()
 console.log(attrList);
@@ -71,7 +73,7 @@ let data = {
     nodes:cardID.map(d => {
         return {
             id:d,
-            // label:d
+            label:d
         }
     }),
     edges:eList,
@@ -104,6 +106,7 @@ const graph = new G6.Graph({
     modes: {
       default: [ 'drag-canvas', 'zoom-canvas' ]//, 'drag-node'
     },
+    renderer: () => new SVGRenderer(),
     layout: {
       type: 'dagre',
       rankdir: 'LR',
