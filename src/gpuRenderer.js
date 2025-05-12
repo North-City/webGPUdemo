@@ -10,17 +10,17 @@ const STYLE = {
     charColor: [0.0, 0.0, 0.0, 0.9],  // 字体颜色
 
     // 节点矩形样式
-    nodeColor: [0.6, 0.8, 0.8, 1.0],
+    nodeColor: [0.6, 0.0, 0.0, 0.6],
 
     // 连线样式
-    edgeColor: [0.5, 0.5, 0.5, 1.0],
+    edgeColor: [0.5, 0.5, 0.5, 0.5],
 
     // 箭头样式
     arrowColor: [0.3, 0.3, 0.3, 1.0],
-    arrowSize: 0.05,             // 箭头大小
+    arrowSize: 0.03,             // 箭头大小
     charShiftY:0.02
 };
-export async function initWebGPU(G6Graph) {
+export async function initWebGPU(graph) {
     if (!navigator.gpu) {
         alert("WebGPU not supported");
         return;
@@ -34,9 +34,9 @@ export async function initWebGPU(G6Graph) {
 
     context.configure({ device, format, alphaMode: "opaque" });
 
-    const chars = collectCharsFromGraph(G6Graph)
+    const chars = collectCharsFromGraph(graph)
     const UVmap = createCharUVMap(chars)
-    const data = extractDataFromG6(G6Graph, canvas, UVmap);
+    const data = extractDataFromG6(graph, canvas, UVmap);
     const { texture: fontTexture, sampler: fontSampler } = await generateDigitTexture(device, chars);
 
     // === Uniforms
@@ -345,8 +345,8 @@ function createPipeline(device, module, layout, format, vert, frag, buffers, top
 
 function collectCharsFromGraph(graph) {
     const charSet = new Set();
-    graph.cfg.data.nodes.forEach(node => {
-        const idStr = node.id.toString();
+    graph.nodes.forEach(node => {
+        const idStr = node.label.toString();
         for (const ch of idStr) {
             charSet.add(ch);
         }
@@ -461,13 +461,15 @@ function extractDataFromG6(graph, canvas, uvMap) {
 
     let rects = [], polylines = [], arrows = [], chars = [];
 
-    graph.cfg.data.nodes.forEach(node => {
+    graph.nodes.forEach(node => {
         const [x, y] = scale(node.x, node.y);
         const w = node.size[0] / canvas.width * 2;
         const h = node.size[1] / canvas.height * 2;
+        // const w = node.width / canvas.width * 2;//for GPU
+        // const h = node.height / canvas.height * 2;
         rects.push(x, y, w, h, ...STYLE.nodeColor);
 
-        const idStr = node.id.toString();
+        const idStr = node.label.toString();
         const charSize = STYLE.charSize;
         const charSpacing = charSize * STYLE.charSpacingRatio;
         const step = charSize + charSpacing;
@@ -481,13 +483,13 @@ function extractDataFromG6(graph, canvas, uvMap) {
         
     });
 
-    graph.cfg.data.edges.forEach(edge => {
+    graph.edges.forEach(edge => {
         const [x1, y1] = scale(edge.startPoint.x, edge.startPoint.y);
         const [x2, y2] = scale(edge.endPoint.x, edge.endPoint.y);
         polylines.push(x1, y1, x2, y2);
         arrows.push(x1, y1, x2, y2);
     });
-    debugger;
+    
     return {
         rects: new Float32Array(rects),
         polylines: new Float32Array(polylines),

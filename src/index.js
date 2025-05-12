@@ -8,6 +8,7 @@ import * as G6 from '@antv/g6';
 import { Renderer as SVGRenderer } from '@antv/g-svg';
 import { Renderer as WebGLRenderer } from '@antv/g-webgl';
 import originData from '../data/data-11W.csv';
+//data init
 let attrList = originData.shift()
 console.log(attrList);
 function replaceAsterisks(arr) {
@@ -63,11 +64,10 @@ function generateEdges(data) {
 }
 let cardID = mergeAndDeduplicate(dat)
 let eList = generateEdges(dat)
-console.log(cardID);
+console.log("1",cardID);
 
 console.log(eList);
-// let dagreGraph = dagreLayout({nodes:cardID.splice(0,100), edges:[]})
-// console.log(dagreGraph.node);
+
 
 let data = {
     nodes:cardID.map(d => {
@@ -144,8 +144,14 @@ const graph = new G6.Graph({
   });
   graph.data(data);
   graph.render();
-  initWebGPU(graph);
-  console.log(graph)
+  let dataForGPU = {
+    nodes:graph.cfg.data.nodes,
+    edges:graph.cfg.data.edges
+  }
+  // console.log(dataForGPU);
+  
+  // let dagreGraph = dagreLayout({nodes:cardID, edges:eList})
+  initWebGPU(dataForGPU);
 
 
 

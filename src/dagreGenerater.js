@@ -5,7 +5,7 @@ export function dagreLayout({nodes,edges}=
     {nodes:[0,1,2],edges:[{source:0,target:1},{source:0,target:2}]}
 ) {
     var g = new dagre.graphlib.Graph();
-    g.setGraph({});
+    g.setGraph({rankdir:'LR'});
     // Default to assigning a new object as a label for each new edge.
     g.setDefaultEdgeLabel(function () { return {}; });
 
@@ -21,12 +21,18 @@ export function dagreLayout({nodes,edges}=
         g.setEdge(e.source, e.target)
     })
     dagre.layout(g);
+    let result = {
+        nodes:[],
+        edges:[]
+    }
     g.nodes().forEach(function (v) {
-        console.log("Node " + v + ": " + JSON.stringify(g.node(v)));
+        result.nodes.push(g.node(v))
+        // console.log("Node " + v + ": " + JSON.stringify(g.node(v)));
     });
     g.edges().forEach(function (e) {
-        console.log("Edge " + e.v + " -> " + e.w + ": " + JSON.stringify(g.edge(e)));
+        result.edges.push(g.edge(e))
+        // console.log("Edge " + e.v + " -> " + e.w + ": " + JSON.stringify(g.edge(e)));
     });
-    return g
+    return result
 }
 
