@@ -1,16 +1,17 @@
 import { mat3 } from 'gl-matrix';
 // === 全局样式配置 ===
-
+const sampleCount = 4; // 开启 4 倍 MSAA
+let msaaTexture = null; //  提前声明全局变量
 // 字符渲染样式
 const STYLE = {
     charSize: 0.015,             // 字体宽（世界坐标）
     charHeightRatio: 1.5,        // 字体高宽比
     charSpacingRatio: 0.1,       // 字符之间的空隙（占charSize的比例）
-    clearColor:[0.9, 0.9, 0.9, 1],//background
+    clearColor: [0.9, 0.9, 0.9, 1],//background
     charColor: [0.0, 0.0, 0.0, 0.9],  // 字体颜色
 
     // 节点矩形样式
-    nodeColor: [0.6, 0.0, 0.0, 0.6],
+    nodeColor: [0.6, 0.8, 0.8, 0.6],
 
     // 连线样式
     edgeColor: [0.5, 0.5, 0.5, 0.5],
@@ -18,7 +19,7 @@ const STYLE = {
     // 箭头样式
     arrowColor: [0.3, 0.3, 0.3, 1.0],
     arrowSize: 0.03,             // 箭头大小
-    charShiftY:0.02
+    charShiftY: 0.02
 };
 export async function initWebGPU(graph) {
     if (!navigator.gpu) {
@@ -27,7 +28,12 @@ export async function initWebGPU(graph) {
     }
 
     const adapter = await navigator.gpu.requestAdapter();
+    const limits = adapter.limits;
+    console.log("maxSampleCount:", limits.maxSampledTexturesPerShaderStage);
     const device = await adapter.requestDevice();
+    device.addEventListener("uncapturederror", e => {
+        console.error("GPU ERROR:", e.error);
+    });
     const canvas = document.getElementById("webgpuCanvas");
     const context = canvas.getContext("webgpu");
     const format = navigator.gpu.getPreferredCanvasFormat();
@@ -42,7 +48,7 @@ export async function initWebGPU(graph) {
     // === Uniforms
     const viewMatrix = mat3.create();
     const uniformBuffer = device.createBuffer({
-        size: 64,
+        size: 80,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
@@ -72,7 +78,9 @@ export async function initWebGPU(graph) {
         code: `
         
       struct Uniforms {
-        viewMatrix : mat4x4<f32>
+        viewMatrix : mat4x4<f32>,
+          hoverPos1 : vec2<f32>,
+          hoverPos2 : vec2<f32>
       };
       @group(0) @binding(0) var<uniform> uniforms : Uniforms;
       @group(0) @binding(1) var fontTex : texture_2d<f32>;
@@ -108,14 +116,57 @@ export async function initWebGPU(graph) {
         @location(3) u1: f32
       };
 
-      @vertex
-      fn rect_vertex(input: VertexIn) -> Out {
-        var out: Out;
-        let world = input.instPos + input.pos * input.instSize;
-        out.position = uniforms.viewMatrix * vec4<f32>(world, 0.0, 1.0);
-        out.color = input.instColor;
-        return out;
-      }
+fn distanceSquared(a: vec2<f32>, b: vec2<f32>) -> f32 {
+  let dx = a.x - b.x;
+  let dy = a.y - b.y;
+  return dx * dx + dy * dy;
+}
+  fn crossProduct(o: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+}
+    fn isIntersecting(p1: vec2<f32>, p2: vec2<f32>, q1: vec2<f32>, q2: vec2<f32>) -> bool {
+    // 检查线段 (p1, p2) 是否与线段 (q1, q2) 相交
+    let c1 = crossProduct(q1, q2, p1);
+    let c2 = crossProduct(q1, q2, p2);
+    let c3 = crossProduct(p1, p2, q1);
+    let c4 = crossProduct(p1, p2, q2);
+    
+    return (c1 * c2 < 0.0) && (c3 * c4 < 0.0);
+}
+@vertex
+fn rect_vertex(input: VertexIn) -> Out {
+  var out: Out;
+  let world = input.instPos + input.pos * input.instSize;
+  out.position = uniforms.viewMatrix * vec4<f32>(world, 0.0, 1.0);
+
+  // 节点矩形边界
+  let left   = input.instPos.x - input.instSize.x / 2.0;
+  let right  = input.instPos.x + input.instSize.x / 2.0;
+  let top    = input.instPos.y + input.instSize.y / 2.0;
+  let bottom = input.instPos.y - input.instSize.y / 2.0;
+
+  // Hover 区域边界
+  let hoverLeft   = uniforms.hoverPos1.x;
+  let hoverTop    = uniforms.hoverPos1.y;
+  let hoverRight  = uniforms.hoverPos2.x;
+  let hoverBottom = uniforms.hoverPos2.y;
+
+  // 矩形相交判断
+  let isIntersecting =
+      right >= hoverLeft &&
+      left <= hoverRight &&
+      top >= hoverBottom &&
+      bottom <= hoverTop;
+
+  // 着色逻辑
+  if (isIntersecting) {
+    out.color = vec4<f32>(1.0, 0.0, 0.0, 1.0); // 高亮
+  } else {
+    out.color = input.instColor;
+  }
+
+  return out;
+}
 
       @vertex
       fn simple_vertex(input: SimpleIn) -> Out {
@@ -186,7 +237,7 @@ export async function initWebGPU(graph) {
     const lineBuffer = createBuffer(device, data.polylines, GPUBufferUsage.VERTEX);
     const arrowVertexBuffer = createBuffer(device, new Float32Array([
         0.0, 0.0,
-        -STYLE.arrowSize,  STYLE.arrowSize * 0.4,
+        -STYLE.arrowSize, STYLE.arrowSize * 0.4,
         -STYLE.arrowSize, -STYLE.arrowSize * 0.4
     ]), GPUBufferUsage.VERTEX);
     const arrowInstanceBuffer = createBuffer(device, data.arrowSegments, GPUBufferUsage.VERTEX);
@@ -236,6 +287,9 @@ export async function initWebGPU(graph) {
     // === 控制视图变换
     let scale = 1;
     let offset = [0, 0];
+    let hoverPos1 = [999, 999]; // 默认值设置为图外
+    let hoverPos2 = [999, 999]; // 默认值设置为图外
+    const hoverRadius = 0.03;
     const updateMatrix = () => {
         mat3.identity(viewMatrix);
         mat3.translate(viewMatrix, viewMatrix, offset);
@@ -244,22 +298,73 @@ export async function initWebGPU(graph) {
             viewMatrix[0], viewMatrix[1], 0, 0,
             viewMatrix[3], viewMatrix[4], 0, 0,
             0, 0, 1, 0,
-            viewMatrix[6], viewMatrix[7], 0, 1
+            viewMatrix[6], viewMatrix[7], 0, 1,
+            hoverPos1[0], hoverPos1[1], hoverPos2[0], hoverPos2[1] // 更新为两个坐标
         ]);
+        console.log(mat4);
+        
         device.queue.writeBuffer(uniformBuffer, 0, mat4);
     };
 
     // === 交互
-    canvas.addEventListener("wheel", e => { e.preventDefault(); scale *= 1 - e.deltaY * 0.001; updateMatrix(); });
+    const hoverSize = 0.01;
+    canvas.addEventListener("wheel", e => {
+        e.preventDefault();
+        
+        // 1. 获取鼠标的NDC坐标（WebGPU坐标系：Y向上）
+        const rect = canvas.getBoundingClientRect();
+        const ndcX = (e.clientX - rect.left) / canvas.width * 2 - 1;
+        const ndcY = 1 - (e.clientY - rect.top) / canvas.height * 2;
+        // console.log(ndcX,ndcY);
+        
+    
+        // 2. 计算当前鼠标的世界坐标
+        const invView = mat3.create();
+        if (!mat3.invert(invView, viewMatrix)) return;
+        const worldX = invView[0] * ndcX + invView[3] * ndcY + invView[6];
+        const worldY = invView[1] * ndcX + invView[4] * ndcY + invView[7];
+        // console.log(worldX,worldY);
+        
+        // 3. 使用加法缩放（更稳定）
+        const zoomStep = 0.1 * Math.log(scale + 1); // 动态步长（随scale增大而减小）
+        let newScale = e.deltaY < 0 ? scale + zoomStep : scale - zoomStep;
+        newScale = Math.min(Math.max(newScale, 0.05), 20);
+    
+        // 4. 精确锚点补偿
+        offset[0] -= (worldX - offset[0]) * (newScale / scale - 1);
+        offset[1] -= (worldY - offset[1]) * (newScale / scale - 1);
+        scale = newScale;
+    
+        updateMatrix();
+    });
+    
+    
+    
     canvas.addEventListener("mousedown", e => { dragging = true; last = [e.clientX, e.clientY]; });
     canvas.addEventListener("mouseup", () => dragging = false);
     canvas.addEventListener("mousemove", e => {
-        if (!dragging) return;
-        const dx = (e.clientX - last[0]) / 400;
-        const dy = (e.clientY - last[1]) / 300;
-        offset[0] += dx;
-        offset[1] -= dy;
-        last = [e.clientX, e.clientY];
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) / canvas.width * 2 - 1;
+        const y = 1 - (e.clientY - rect.top) / canvas.height * 2;
+        const inv = mat3.create();
+        if (mat3.invert(inv, viewMatrix)) {
+            const worldX = inv[0] * x + inv[3] * y + inv[6];
+            const worldY = inv[1] * x + inv[4] * y + inv[7];
+
+            hoverPos1 = [worldX - hoverSize / 2, worldY + hoverSize / 2]; // 左上角
+            hoverPos2 = [worldX + hoverSize / 2, worldY - hoverSize / 2]; // 右下角
+        } else {
+            hoverPos1 = [999, 999];
+            hoverPos2 = [999, 999];
+        }
+        // 如果在拖动，也更新偏移
+        if (dragging) {
+            const dx = (e.clientX - last[0]) / 400;
+            const dy = (e.clientY - last[1]) / 300;
+            offset[0] += dx;
+            offset[1] -= dy;
+            last = [e.clientX, e.clientY];
+        }
         updateMatrix();
     });
     let dragging = false, last = [0, 0];
@@ -268,38 +373,54 @@ export async function initWebGPU(graph) {
     // === 渲染帧
     function frame() {
         const encoder = device.createCommandEncoder();
-        const view = context.getCurrentTexture().createView();
+    
+    // 🧠 检查是否需要重建 MSAA 纹理（第一次 or 尺寸变了）
+    if (!msaaTexture || msaaTexture.width !== canvas.width || msaaTexture.height !== canvas.height) {
+        msaaTexture = device.createTexture({
+            size: [canvas.width, canvas.height],
+            sampleCount,
+            format,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT
+        });
+    }
+
+    
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
-                view, loadOp: "clear", storeOp: "store", clearValue: STYLE.clearColor
+                view: msaaTexture.createView(),  // 渲染到 MSAA 纹理
+                resolveTarget: context.getCurrentTexture().createView(), // 解析结果输出到最终画布
+                loadOp: "clear",
+                storeOp: "store",
+                clearValue: STYLE.clearColor
             }]
         });
-
+    
         pass.setBindGroup(0, bindGroup);
-
+    
         pass.setPipeline(linePipeline);
         pass.setVertexBuffer(0, lineBuffer);
         pass.draw(data.polylines.length / 2);
-
+    
         pass.setPipeline(rectPipeline);
         pass.setVertexBuffer(0, quadBuffer);
         pass.setVertexBuffer(1, rectBuffer);
         pass.draw(4, data.rects.length / 8);
-
+    
         pass.setPipeline(arrowPipeline);
         pass.setVertexBuffer(0, arrowVertexBuffer);
         pass.setVertexBuffer(1, arrowInstanceBuffer);
         pass.draw(3, data.arrowSegments.length / 4);
-
+    
         pass.setPipeline(charPipeline);
         pass.setVertexBuffer(0, charQuadBuffer);
         pass.setVertexBuffer(1, charInstanceBuffer);
         pass.draw(4, data.charData.length / 4);
-
+    
         pass.end();
         device.queue.submit([encoder.finish()]);
         requestAnimationFrame(frame);
     }
+    
 
     frame();
 }
@@ -325,7 +446,7 @@ function createPipeline(device, module, layout, format, vert, frag, buffers, top
             entryPoint: frag,
             targets: [{
                 format,
-                blend: {//开启颜色混合
+                blend: {
                     color: {
                         srcFactor: 'src-alpha',
                         dstFactor: 'one-minus-src-alpha',
@@ -339,7 +460,8 @@ function createPipeline(device, module, layout, format, vert, frag, buffers, top
                 }
             }]
         },
-        primitive: { topology }
+        primitive: { topology },
+        multisample: { count: sampleCount } // ✅ 添加此项
     });
 }
 
@@ -468,19 +590,24 @@ function extractDataFromG6(graph, canvas, uvMap) {
         // const w = node.width / canvas.width * 2;//for GPU
         // const h = node.height / canvas.height * 2;
         rects.push(x, y, w, h, ...STYLE.nodeColor);
+        if (Number.isNaN(x) || Number.isNaN(y) || Number.isNaN(w) || Number.isNaN(h) || w == 0 || h == 0) {
+            console.log(x, y, w, h);
+
+        }
+
 
         const idStr = node.label.toString();
         const charSize = STYLE.charSize;
         const charSpacing = charSize * STYLE.charSpacingRatio;
         const step = charSize + charSpacing;
         const baseX = x - (idStr.length - 1) * step * 0.5;//字符相对节点中心位置的偏移
-        
+
         for (let i = 0; i < idStr.length; i++) {
             const ch = idStr[i];
             const [u0, u1] = uvMap[ch] || [0, 0.1];
             chars.push(baseX + i * step, y + STYLE.charShiftY, u0, u1);//含有字符相对节点位置的y偏移
         }
-        
+
     });
 
     graph.edges.forEach(edge => {
@@ -489,7 +616,7 @@ function extractDataFromG6(graph, canvas, uvMap) {
         polylines.push(x1, y1, x2, y2);
         arrows.push(x1, y1, x2, y2);
     });
-    
+
     return {
         rects: new Float32Array(rects),
         polylines: new Float32Array(polylines),
