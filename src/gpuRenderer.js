@@ -19,7 +19,7 @@ const STYLE = {
     // 箭头样式
     arrowColor: [0.3, 0.3, 0.3, 1.0],
     arrowSize: 0.03,             // 箭头大小
-    charShiftY: 0.02
+    charShiftY: 0.0
 };
 export async function initWebGPU(graph) {
     if (!navigator.gpu) {
@@ -292,8 +292,8 @@ fn rect_vertex(input: VertexIn) -> Out {
     const hoverRadius = 0.03;
     const updateMatrix = () => {
         mat3.identity(viewMatrix);
-        mat3.translate(viewMatrix, viewMatrix, offset);
         mat3.scale(viewMatrix, viewMatrix, [scale, scale]);
+        mat3.translate(viewMatrix, viewMatrix, offset);
         const mat4 = new Float32Array([
             viewMatrix[0], viewMatrix[1], 0, 0,
             viewMatrix[3], viewMatrix[4], 0, 0,
@@ -301,7 +301,7 @@ fn rect_vertex(input: VertexIn) -> Out {
             viewMatrix[6], viewMatrix[7], 0, 1,
             hoverPos1[0], hoverPos1[1], hoverPos2[0], hoverPos2[1] // 更新为两个坐标
         ]);
-        console.log(mat4);
+        // console.log(mat4);
         
         device.queue.writeBuffer(uniformBuffer, 0, mat4);
     };
@@ -311,31 +311,32 @@ fn rect_vertex(input: VertexIn) -> Out {
     canvas.addEventListener("wheel", e => {
         e.preventDefault();
         
-        // 1. 获取鼠标的NDC坐标（WebGPU坐标系：Y向上）
-        const rect = canvas.getBoundingClientRect();
-        const ndcX = (e.clientX - rect.left) / canvas.width * 2 - 1;
-        const ndcY = 1 - (e.clientY - rect.top) / canvas.height * 2;
-        // console.log(ndcX,ndcY);
-        
-    
-        // 2. 计算当前鼠标的世界坐标
-        const invView = mat3.create();
-        if (!mat3.invert(invView, viewMatrix)) return;
-        const worldX = invView[0] * ndcX + invView[3] * ndcY + invView[6];
-        const worldY = invView[1] * ndcX + invView[4] * ndcY + invView[7];
-        // console.log(worldX,worldY);
-        
-        // 3. 使用加法缩放（更稳定）
-        const zoomStep = 0.1 * Math.log(scale + 1); // 动态步长（随scale增大而减小）
+        const zoomStep = 0.01 // 动态步长（随scale增大而减小）
         let newScale = e.deltaY < 0 ? scale + zoomStep : scale - zoomStep;
-        newScale = Math.min(Math.max(newScale, 0.05), 20);
-    
-        // 4. 精确锚点补偿
+        newScale = Math.min(Math.max(newScale, 0.05), 20)
+        const worldX = (hoverPos1[0] + hoverPos2[0])/2
+        const worldY = (hoverPos1[1] + hoverPos2[1])/2
+        console.log(worldX,worldY);
+        
         offset[0] -= (worldX - offset[0]) * (newScale / scale - 1);
         offset[1] -= (worldY - offset[1]) * (newScale / scale - 1);
         scale = newScale;
     
         updateMatrix();
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) / canvas.width * 2 - 1;
+        const y = 1 - (e.clientY - rect.top) / canvas.height * 2;
+        const inv = mat3.create();
+        if (mat3.invert(inv, viewMatrix)) {
+            const worldX = inv[0] * x + inv[3] * y + inv[6];
+            const worldY = inv[1] * x + inv[4] * y + inv[7];
+
+            hoverPos1 = [worldX - hoverSize / 2, worldY + hoverSize / 2]; // 左上角
+            hoverPos2 = [worldX + hoverSize / 2, worldY - hoverSize / 2]; // 右下角
+        } else {
+            hoverPos1 = [999, 999];
+            hoverPos2 = [999, 999];
+        }
     });
     
     
@@ -359,12 +360,29 @@ fn rect_vertex(input: VertexIn) -> Out {
         }
         // 如果在拖动，也更新偏移
         if (dragging) {
-            const dx = (e.clientX - last[0]) / 400;
-            const dy = (e.clientY - last[1]) / 300;
-            offset[0] += dx;
-            offset[1] -= dy;
+            const rect = canvas.getBoundingClientRect();
+        
+            const prevX = (last[0] - rect.left) / canvas.width * 2 - 1;
+            const prevY = 1 - (last[1] - rect.top) / canvas.height * 2;
+        
+            const currX = (e.clientX - rect.left) / canvas.width * 2 - 1;
+            const currY = 1 - (e.clientY - rect.top) / canvas.height * 2;
+        
+            const inv = mat3.create();
+            if (mat3.invert(inv, viewMatrix)) {
+                const prevWorldX = inv[0] * prevX + inv[3] * prevY + inv[6];
+                const prevWorldY = inv[1] * prevX + inv[4] * prevY + inv[7];
+        
+                const currWorldX = inv[0] * currX + inv[3] * currY + inv[6];
+                const currWorldY = inv[1] * currX + inv[4] * currY + inv[7];
+        
+                offset[0] += currWorldX - prevWorldX;
+                offset[1] += currWorldY - prevWorldY;
+            }
+        
             last = [e.clientX, e.clientY];
         }
+        
         updateMatrix();
     });
     let dragging = false, last = [0, 0];
@@ -492,7 +510,7 @@ function generateDigitTextureCanvas() {
 
     // ✅ 设置黑字
     ctx.fillStyle = "black";
-    ctx.font = "24px monospace";//字在图集中的大小越大，图集的字就越清晰，占的纹理空间也越多（可能会让单个字符图占据更大的纹理区域，UV计算不变）
+    ctx.font = "24px sans-serif";//字在图集中的大小越大，图集的字就越清晰，占的纹理空间也越多（可能会让单个字符图占据更大的纹理区域，UV计算不变）
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
 
@@ -521,7 +539,7 @@ function generateCharTextureCanvas(charList) {
     const ctx = canvas.getContext("2d", { alpha: true });
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "black";
-    ctx.font = `${fontSize}px monospace`;//字在图集中的大小越大，图集的字就越清晰，占的纹理空间也越多（可能会让单个字符图占据更大的纹理区域，UV计算不变）
+    ctx.font = `${fontSize}px sans-serif`;//字在图集中的大小越大，图集的字就越清晰，占的纹理空间也越多（可能会让单个字符图占据更大的纹理区域，UV计算不变）
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
 
