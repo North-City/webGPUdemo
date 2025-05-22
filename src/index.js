@@ -8,6 +8,9 @@ import * as G6 from '@antv/g6';
 import { Renderer as SVGRenderer } from '@antv/g-svg';
 import { Renderer as WebGLRenderer } from '@antv/g-webgl';
 import originData from '../data/data-11W.csv';
+import data1 from '../data/data_one'
+import data2 from '../data/data_two'
+
 //data init
 let attrList = originData.shift()
 console.log(attrList);
@@ -69,15 +72,16 @@ console.log("1",cardID);
 console.log(eList);
 
 
-let data = {
-    nodes:cardID.map(d => {
-        return {
-            id:d,
-            label:d
-        }
-    }),
-    edges:eList,
-}
+let data = data2
+// {
+//     nodes:cardID.map(d => {
+//         return {
+//             id:d,
+//             label:d
+//         }
+//     }),
+//     edges:eList,
+// }
 // d3.csv("./data/data-11W.csv").then(function(data) {
 //     // 2. 数据加载成功后的回调函数
 //     console.log("原始数据：", data);
@@ -118,7 +122,7 @@ const graph = new G6.Graph({
         return 1;
       }
     },
-    animate: true,
+    animate: false,
     defaultNode: {
       size: [ 50, 20 ],
         type: 'rect',
@@ -143,12 +147,12 @@ const graph = new G6.Graph({
     }
   });
   graph.data(data);
-  graph.render();
+  await graph.render();
   let dataForGPU = {
     nodes:graph.cfg.data.nodes,
     edges:graph.cfg.data.edges
   }
-  // console.log(dataForGPU);
+  console.log("dataForGPU",dataForGPU);
   
   // let dagreGraph = dagreLayout({nodes:cardID, edges:eList})
   initWebGPU(dataForGPU);

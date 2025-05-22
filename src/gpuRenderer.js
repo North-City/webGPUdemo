@@ -41,9 +41,8 @@ export async function initWebGPU(graph) {
     context.configure({ device, format, alphaMode: "opaque" });
 
     const chars = collectCharsFromGraph(graph)
-    const UVmap = createCharUVMap(chars)
-    const data = extractDataFromG6(graph, canvas, UVmap);
-    const { texture: fontTexture, sampler: fontSampler } = await generateDigitTexture(device, chars);
+const { texture: fontTexture, sampler: fontSampler, uvMap } = await generateDigitTexture(device, chars);
+const data = extractDataFromG6(graph, canvas, uvMap);
 
     // === Uniforms
     const viewMatrix = mat3.create();
@@ -311,7 +310,7 @@ fn rect_vertex(input: VertexIn) -> Out {
     canvas.addEventListener("wheel", e => {
         e.preventDefault();
         
-        const zoomStep = 0.01 // 动态步长（随scale增大而减小）
+        const zoomStep = 0.03 // 动态步长（随scale增大而减小）
         let newScale = e.deltaY < 0 ? scale + zoomStep : scale - zoomStep;
         newScale = Math.min(Math.max(newScale, 0.05), 20)
         const worldX = (hoverPos1[0] + hoverPos2[0])/2
@@ -529,36 +528,50 @@ function generateDigitTextureCanvas() {
 }
 
 function generateCharTextureCanvas(charList) {
-    const canvas = document.createElement("canvas");
     const fontSize = 72;
-    const cellW = fontSize + 8; // 给字体大小预留一点padding
-    const cellH = fontSize * 1.5;
-    canvas.width = cellW * charList.length;
+    const padding = fontSize * 0.4;
+
+    const ctx = document.createElement("canvas").getContext("2d");
+    ctx.font = `${fontSize}px sans-serif`;
+
+    const charWidths = charList.map(ch => ctx.measureText(ch).width + 2 * padding);
+    const totalWidth = charWidths.reduce((a, b) => a + b, 0);
+    const cellH = fontSize * 2;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = totalWidth;
     canvas.height = cellH;
 
-    const ctx = canvas.getContext("2d", { alpha: true });
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "black";
-    ctx.font = `${fontSize}px sans-serif`;//字在图集中的大小越大，图集的字就越清晰，占的纹理空间也越多（可能会让单个字符图占据更大的纹理区域，UV计算不变）
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
+    const ctx2 = canvas.getContext("2d", { alpha: true });
+    ctx2.clearRect(0, 0, canvas.width, canvas.height);
+    ctx2.fillStyle = "black";
+    ctx2.font = `${fontSize}px sans-serif`;
+    ctx2.textAlign = "left";
+    ctx2.textBaseline = "middle";
 
+    const uvMap = {};
+    let offsetX = 0;
     for (let i = 0; i < charList.length; i++) {
-        const x = i * cellW + cellW / 2;
+        const ch = charList[i];
+        const width = charWidths[i];
+        const x = offsetX + padding;
         const y = cellH / 2;
-        ctx.fillText(charList[i], x, y);
+        ctx2.fillText(ch, x, y);
+
+        uvMap[ch] = [offsetX / totalWidth, (offsetX + width) / totalWidth];
+        offsetX += width;
     }
 
-    return canvas;
+    return { canvas, uvMap };
 }
 
 
 async function generateDigitTexture(device, charList) {
     // const canvas = generateDigitTextureCanvas(); // 你已有的图集绘制逻辑
-    const canvas = generateCharTextureCanvas(charList)
+    const { canvas, uvMap } = generateCharTextureCanvas(charList)
     const texture = uploadTextureByImageData(device, canvas);
     const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
-    return { texture, sampler };
+    return { texture, sampler, uvMap };
 }
 
 function uploadTextureByImageData(device, canvas) {
@@ -603,8 +616,10 @@ function extractDataFromG6(graph, canvas, uvMap) {
 
     graph.nodes.forEach(node => {
         const [x, y] = scale(node.x, node.y);
-        const w = node.size[0] / canvas.width * 2;
-        const h = node.size[1] / canvas.height * 2;
+        const w = node.size / canvas.width * 2;//for JinAn data
+        const h = node.size / canvas.height * 2;
+        // const w = node.size[0] / canvas.width * 2;//for G6
+        // const h = node.size[1] / canvas.height * 2;
         // const w = node.width / canvas.width * 2;//for GPU
         // const h = node.height / canvas.height * 2;
         rects.push(x, y, w, h, ...STYLE.nodeColor);
@@ -634,7 +649,6 @@ function extractDataFromG6(graph, canvas, uvMap) {
         polylines.push(x1, y1, x2, y2);
         arrows.push(x1, y1, x2, y2);
     });
-
     return {
         rects: new Float32Array(rects),
         polylines: new Float32Array(polylines),
