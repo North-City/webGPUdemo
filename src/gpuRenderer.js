@@ -19,7 +19,7 @@ const STYLE = {
     // 箭头样式
     arrowColor: [0.3, 0.3, 0.3, 1.0],
     arrowSize: 0.03,             // 箭头大小
-    charShiftY: 0.0
+    charShiftY: -0.05
 };
 export async function initWebGPU(graph) {
     if (!navigator.gpu) {
@@ -41,8 +41,24 @@ export async function initWebGPU(graph) {
     context.configure({ device, format, alphaMode: "opaque" });
 
     const chars = collectCharsFromGraph(graph)
-const { texture: fontTexture, sampler: fontSampler, uvMap } = await generateDigitTexture(device, chars);
-const data = extractDataFromG6(graph, canvas, uvMap);
+    const { texture: fontTexture, sampler: fontSampler, uvMap } = await generateDigitTexture(device, chars);
+    const imageList = ["../data/1.png"];
+    const { canvas: imageCanvas, uvMap: imageUVMap } = await generateImageAtlas(imageList);
+    const imageTexture = uploadTextureByImageData(device, imageCanvas);
+    const imageSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
+    // 偏移量（贴图相对矩形中心位置）
+    const imageOffset = -0.005;
+
+    const imageInstances = graph.nodes.map(node => {
+        const [x, y] = [(node.x / canvas.width) * 2 - 1, 1 - (node.y / canvas.height) * 2];
+        const w = node.size / canvas.width * 2;
+        const h = node.size / canvas.height * 2;
+        const uv = imageUVMap["../data/1.png"] || [0, 0.1, 0, 0.1];
+        return [x + imageOffset, y + imageOffset, w, h, ...uv];
+    }).flat();
+
+
+    const data = extractDataFromG6(graph, canvas, uvMap);
 
     // === Uniforms
     const viewMatrix = mat3.create();
@@ -51,26 +67,34 @@ const data = extractDataFromG6(graph, canvas, uvMap);
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
-    const bindGroupLayout = device.createBindGroupLayout({
-        entries: [
-            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: {} },
-            { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
-            { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} }
-        ]
-    });
 
+
+const bindGroupLayout = device.createBindGroupLayout({
+  entries: [
+    { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: {} },  // uniform
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} }, // fontTex
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} }, // fontSamp
+    { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} }, // imageTex
+    { binding: 4, visibility: GPUShaderStage.FRAGMENT, sampler: {} }  // imageSamp
+  ]
+});
+
+    
+    
     const pipelineLayout = device.createPipelineLayout({
-        bindGroupLayouts: [bindGroupLayout]
+        bindGroupLayouts: [bindGroupLayout] // group(0), group(1)
     });
 
-    const bindGroup = device.createBindGroup({
-        layout: bindGroupLayout,
-        entries: [
-            { binding: 0, resource: { buffer: uniformBuffer } },
-            { binding: 1, resource: fontTexture.createView() },
-            { binding: 2, resource: fontSampler }
-        ]
-    });
+const bindGroup = device.createBindGroup({
+  layout: bindGroupLayout,
+  entries: [
+    { binding: 0, resource: { buffer: uniformBuffer } },
+    { binding: 1, resource: fontTexture.createView() },
+    { binding: 2, resource: fontSampler },
+    { binding: 3, resource: imageTexture.createView() },
+    { binding: 4, resource: imageSampler }
+  ]
+});
 
     // === Shader
     const shaderModule = device.createShaderModule({
@@ -81,9 +105,12 @@ const data = extractDataFromG6(graph, canvas, uvMap);
           hoverPos1 : vec2<f32>,
           hoverPos2 : vec2<f32>
       };
-      @group(0) @binding(0) var<uniform> uniforms : Uniforms;
-      @group(0) @binding(1) var fontTex : texture_2d<f32>;
-      @group(0) @binding(2) var fontSamp : sampler;
+    @group(0) @binding(0) var<uniform> uniforms : Uniforms;
+    @group(0) @binding(1) var fontTex : texture_2d<f32>;
+    @group(0) @binding(2) var fontSamp : sampler;
+    @group(0) @binding(3) var imageTex : texture_2d<f32>;
+    @group(0) @binding(4) var imageSamp : sampler;
+
 
       struct Out {
         @builtin(position) position : vec4<f32>,
@@ -114,6 +141,15 @@ const data = extractDataFromG6(graph, canvas, uvMap);
         @location(2) u0: f32,
         @location(3) u1: f32
       };
+      struct ImageIn {
+        @location(0) pos: vec2<f32>,
+        @location(1) instPos: vec2<f32>,
+        @location(2) instSize: vec2<f32>,
+        @location(3) u0: f32,
+        @location(4) u1: f32,
+        @location(5) v0: f32,
+        @location(6) v1: f32,
+        };
 
 fn distanceSquared(a: vec2<f32>, b: vec2<f32>) -> f32 {
   let dx = a.x - b.x;
@@ -224,11 +260,43 @@ fn rect_vertex(input: VertexIn) -> Out {
         let fontColor = vec4<f32>(${STYLE.charColor.join(", ")}); // 白色字
         return vec4<f32>(fontColor.rgb, fontColor.a * tex.a);
         }
+
+        @vertex
+fn image_vertex(input: ImageIn) -> Out {
+  var out: Out;
+  let world = input.instPos + input.pos * input.instSize;
+  out.position = uniforms.viewMatrix * vec4<f32>(world, 0.0, 1.0);
+  out.uv = vec2<f32>(
+    mix(input.u0, input.u1, input.pos.x+ 0.5),
+    mix(input.v1, input.v0, input.pos.y+ 0.5)
+  );
+  out.color = vec4<f32>(1.0);
+  return out;
+}
+@fragment
+fn image_frag(input: Out) -> @location(0) vec4<f32> {
+  return textureSample(imageTex, imageSamp, input.uv);
+} 
     `
     });
 
     // === 创建各类 buffer（矩形、线段、箭头、字符）
+    const imageInstanceBuffer = createBuffer(device, new Float32Array(imageInstances), GPUBufferUsage.VERTEX);
 
+
+    const imagePipeline = createPipeline(device, shaderModule, pipelineLayout, format, "image_vertex", "image_frag", [
+        { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
+        {
+            arrayStride: 32, stepMode: "instance", attributes: [
+                { shaderLocation: 1, format: "float32x2", offset: 0 },
+                { shaderLocation: 2, format: "float32x2", offset: 8 },
+                { shaderLocation: 3, format: "float32", offset: 16 },
+                { shaderLocation: 4, format: "float32", offset: 20 },
+                { shaderLocation: 5, format: "float32", offset: 24 },
+                { shaderLocation: 6, format: "float32", offset: 28 }
+            ]
+        }
+    ], "triangle-strip");
     const quad = new Float32Array([-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5]);
     const quadBuffer = createBuffer(device, quad, GPUBufferUsage.VERTEX);
 
@@ -301,7 +369,7 @@ fn rect_vertex(input: VertexIn) -> Out {
             hoverPos1[0], hoverPos1[1], hoverPos2[0], hoverPos2[1] // 更新为两个坐标
         ]);
         // console.log(mat4);
-        
+
         device.queue.writeBuffer(uniformBuffer, 0, mat4);
     };
 
@@ -309,18 +377,18 @@ fn rect_vertex(input: VertexIn) -> Out {
     const hoverSize = 0.01;
     canvas.addEventListener("wheel", e => {
         e.preventDefault();
-        
+
         const zoomStep = 0.03 // 动态步长（随scale增大而减小）
         let newScale = e.deltaY < 0 ? scale + zoomStep : scale - zoomStep;
         newScale = Math.min(Math.max(newScale, 0.05), 20)
-        const worldX = (hoverPos1[0] + hoverPos2[0])/2
-        const worldY = (hoverPos1[1] + hoverPos2[1])/2
-        console.log(worldX,worldY);
-        
+        const worldX = (hoverPos1[0] + hoverPos2[0]) / 2
+        const worldY = (hoverPos1[1] + hoverPos2[1]) / 2
+        console.log(worldX, worldY);
+
         offset[0] -= (worldX - offset[0]) * (newScale / scale - 1);
         offset[1] -= (worldY - offset[1]) * (newScale / scale - 1);
         scale = newScale;
-    
+
         updateMatrix();
         const rect = canvas.getBoundingClientRect();
         const x = (e.clientX - rect.left) / canvas.width * 2 - 1;
@@ -337,9 +405,9 @@ fn rect_vertex(input: VertexIn) -> Out {
             hoverPos2 = [999, 999];
         }
     });
-    
-    
-    
+
+
+
     canvas.addEventListener("mousedown", e => { dragging = true; last = [e.clientX, e.clientY]; });
     canvas.addEventListener("mouseup", () => dragging = false);
     canvas.addEventListener("mousemove", e => {
@@ -360,28 +428,28 @@ fn rect_vertex(input: VertexIn) -> Out {
         // 如果在拖动，也更新偏移
         if (dragging) {
             const rect = canvas.getBoundingClientRect();
-        
+
             const prevX = (last[0] - rect.left) / canvas.width * 2 - 1;
             const prevY = 1 - (last[1] - rect.top) / canvas.height * 2;
-        
+
             const currX = (e.clientX - rect.left) / canvas.width * 2 - 1;
             const currY = 1 - (e.clientY - rect.top) / canvas.height * 2;
-        
+
             const inv = mat3.create();
             if (mat3.invert(inv, viewMatrix)) {
                 const prevWorldX = inv[0] * prevX + inv[3] * prevY + inv[6];
                 const prevWorldY = inv[1] * prevX + inv[4] * prevY + inv[7];
-        
+
                 const currWorldX = inv[0] * currX + inv[3] * currY + inv[6];
                 const currWorldY = inv[1] * currX + inv[4] * currY + inv[7];
-        
+
                 offset[0] += currWorldX - prevWorldX;
                 offset[1] += currWorldY - prevWorldY;
             }
-        
+
             last = [e.clientX, e.clientY];
         }
-        
+
         updateMatrix();
     });
     let dragging = false, last = [0, 0];
@@ -390,18 +458,18 @@ fn rect_vertex(input: VertexIn) -> Out {
     // === 渲染帧
     function frame() {
         const encoder = device.createCommandEncoder();
-    
-    // 🧠 检查是否需要重建 MSAA 纹理（第一次 or 尺寸变了）
-    if (!msaaTexture || msaaTexture.width !== canvas.width || msaaTexture.height !== canvas.height) {
-        msaaTexture = device.createTexture({
-            size: [canvas.width, canvas.height],
-            sampleCount,
-            format,
-            usage: GPUTextureUsage.RENDER_ATTACHMENT
-        });
-    }
 
-    
+        // 🧠 检查是否需要重建 MSAA 纹理（第一次 or 尺寸变了）
+        if (!msaaTexture || msaaTexture.width !== canvas.width || msaaTexture.height !== canvas.height) {
+            msaaTexture = device.createTexture({
+                size: [canvas.width, canvas.height],
+                sampleCount,
+                format,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT
+            });
+        }
+
+
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
                 view: msaaTexture.createView(),  // 渲染到 MSAA 纹理
@@ -411,33 +479,40 @@ fn rect_vertex(input: VertexIn) -> Out {
                 clearValue: STYLE.clearColor
             }]
         });
-    
+
         pass.setBindGroup(0, bindGroup);
-    
+
         pass.setPipeline(linePipeline);
         pass.setVertexBuffer(0, lineBuffer);
         pass.draw(data.polylines.length / 2);
-    
+
         pass.setPipeline(rectPipeline);
         pass.setVertexBuffer(0, quadBuffer);
         pass.setVertexBuffer(1, rectBuffer);
         pass.draw(4, data.rects.length / 8);
-    
+
+        pass.setPipeline(imagePipeline);
+        pass.setVertexBuffer(0, quadBuffer);
+        pass.setVertexBuffer(1, imageInstanceBuffer);
+        pass.draw(4, imageInstances.length / 8); // 每个 instance 8 个 float
+
         pass.setPipeline(arrowPipeline);
         pass.setVertexBuffer(0, arrowVertexBuffer);
         pass.setVertexBuffer(1, arrowInstanceBuffer);
         pass.draw(3, data.arrowSegments.length / 4);
-    
+
         pass.setPipeline(charPipeline);
         pass.setVertexBuffer(0, charQuadBuffer);
         pass.setVertexBuffer(1, charInstanceBuffer);
         pass.draw(4, data.charData.length / 4);
-    
+
+
+
         pass.end();
         device.queue.submit([encoder.finish()]);
         requestAnimationFrame(frame);
     }
-    
+
 
     frame();
 }
@@ -565,6 +640,43 @@ function generateCharTextureCanvas(charList) {
     return { canvas, uvMap };
 }
 
+async function generateImageAtlas(imageList) {
+    const imgSize = 256;
+    const rowLen = Math.ceil(Math.sqrt(imageList.length));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = rowLen * imgSize;
+    canvas.height = rowLen * imgSize;
+
+    const ctx = canvas.getContext("2d", { alpha: true });
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const uvMap = {};
+
+    // 异步加载所有图片
+    const loadImage = src => new Promise(resolve => {
+        const img = new Image();
+        img.onload = () => resolve({ src, img });
+        img.src = src;
+    });
+
+    const loadedImages = await Promise.all(imageList.map(loadImage));
+
+    // 绘制图集并记录 UV
+    loadedImages.forEach(({ src, img }, idx) => {
+        const row = Math.floor(idx / rowLen);
+        const col = idx % rowLen;
+        const x = col * imgSize;
+        const y = row * imgSize;
+        ctx.drawImage(img, x, y, imgSize, imgSize);
+        uvMap[src] = [
+            x / canvas.width, (x + imgSize) / canvas.width,
+            y / canvas.height, (y + imgSize) / canvas.height
+        ];
+    });
+    return { canvas, uvMap };
+}
+
 
 async function generateDigitTexture(device, charList) {
     // const canvas = generateDigitTextureCanvas(); // 你已有的图集绘制逻辑
@@ -656,4 +768,5 @@ function extractDataFromG6(graph, canvas, uvMap) {
         charData: new Float32Array(chars)
     };
 }
+
 
