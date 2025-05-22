@@ -69,32 +69,32 @@ export async function initWebGPU(graph) {
 
 
 
-const bindGroupLayout = device.createBindGroupLayout({
-  entries: [
-    { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: {} },  // uniform
-    { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} }, // fontTex
-    { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} }, // fontSamp
-    { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} }, // imageTex
-    { binding: 4, visibility: GPUShaderStage.FRAGMENT, sampler: {} }  // imageSamp
-  ]
-});
+    const bindGroupLayout = device.createBindGroupLayout({
+        entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: {} },  // uniform
+            { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} }, // fontTex
+            { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} }, // fontSamp
+            { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} }, // imageTex
+            { binding: 4, visibility: GPUShaderStage.FRAGMENT, sampler: {} }  // imageSamp
+        ]
+    });
 
-    
-    
+
+
     const pipelineLayout = device.createPipelineLayout({
         bindGroupLayouts: [bindGroupLayout] // group(0), group(1)
     });
 
-const bindGroup = device.createBindGroup({
-  layout: bindGroupLayout,
-  entries: [
-    { binding: 0, resource: { buffer: uniformBuffer } },
-    { binding: 1, resource: fontTexture.createView() },
-    { binding: 2, resource: fontSampler },
-    { binding: 3, resource: imageTexture.createView() },
-    { binding: 4, resource: imageSampler }
-  ]
-});
+    const bindGroup = device.createBindGroup({
+        layout: bindGroupLayout,
+        entries: [
+            { binding: 0, resource: { buffer: uniformBuffer } },
+            { binding: 1, resource: fontTexture.createView() },
+            { binding: 2, resource: fontSampler },
+            { binding: 3, resource: imageTexture.createView() },
+            { binding: 4, resource: imageSampler }
+        ]
+    });
 
     // === Shader
     const shaderModule = device.createShaderModule({
@@ -139,7 +139,9 @@ const bindGroup = device.createBindGroup({
         @location(0) pos: vec2<f32>,
         @location(1) center: vec2<f32>,
         @location(2) u0: f32,
-        @location(3) u1: f32
+        @location(3) u1: f32,
+        @location(4) v0: f32,
+        @location(5) v1: f32
       };
       struct ImageIn {
         @location(0) pos: vec2<f32>,
@@ -228,21 +230,20 @@ fn rect_vertex(input: VertexIn) -> Out {
         return out;
       }
 
-        @vertex
-        fn char_vertex(input: CharIn) -> Out {
-        var out: Out;
-        let size = vec2<f32>(${STYLE.charSize}, ${STYLE.charSize * STYLE.charHeightRatio}); // 字符尺寸size 就是单个字符在世界坐标下的尺寸。
-        let offset = input.pos * size;
-        let world = input.center + offset;
-        out.position = uniforms.viewMatrix * vec4<f32>(world, 0.0, 1.0);
+@vertex
+fn char_vertex(input: CharIn) -> Out {
+  var out: Out;
+  let size = vec2<f32>(${STYLE.charSize}, ${STYLE.charSize * STYLE.charHeightRatio});
+  let offset = input.pos * size;
+  let world = input.center + offset;
+  out.position = uniforms.viewMatrix * vec4<f32>(world, 0.0, 1.0);
 
-        // 这里修正 UV 映射
-        out.uv = vec2<f32>(
-            mix(input.u0, input.u1, input.pos.x * 0.5 + 0.5), // 横向 UV 正确在 u0 ~ u1 区间变化
-            input.pos.y * -0.5 + 0.5 // 纵向 UV: 上 0，下 1（因为canvas坐标是左上角）
-        );
-        return out;
-        }
+  out.uv = vec2<f32>(
+    mix(input.u0, input.u1, input.pos.x * 0.5 + 0.5),
+    mix(input.v0, input.v1, input.pos.y * -0.5 + 0.5)
+  );
+  return out;
+}
 
         @fragment
         fn fragment_main(input: Out) -> @location(0) vec4<f32> {
@@ -313,7 +314,10 @@ fn image_frag(input: Out) -> @location(0) vec4<f32> {
         -0.5, 0.5, 0.5, 0.5
     ]), GPUBufferUsage.VERTEX);
     const charInstanceBuffer = createBuffer(device, data.charData, GPUBufferUsage.VERTEX);
-
+console.log("charData length:", data.charData.length);
+console.log("charData example:", data.charData.slice(0, 12));
+const expectedBytes = data.charData.length * Float32Array.BYTES_PER_ELEMENT;
+console.log("charInstanceBuffer size:", expectedBytes);
     // === 创建 pipelines（矩形、边、箭头、字符）
     const rectPipeline = createPipeline(device, shaderModule, pipelineLayout, format, "rect_vertex", "fragment_main", [
         { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
@@ -340,16 +344,20 @@ fn image_frag(input: Out) -> @location(0) vec4<f32> {
         }
     ], "triangle-list");
 
-    const charPipeline = createPipeline(device, shaderModule, pipelineLayout, format, "char_vertex", "char_frag", [
-        { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
-        {
-            arrayStride: 16, stepMode: "instance", attributes: [
-                { shaderLocation: 1, format: "float32x2", offset: 0 },
-                { shaderLocation: 2, format: "float32", offset: 8 },
-                { shaderLocation: 3, format: "float32", offset: 12 }
-            ]
-        }
-    ], "triangle-strip");
+const charPipeline = createPipeline(device, shaderModule, pipelineLayout, format, "char_vertex", "char_frag", [
+  { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
+  {
+    arrayStride: 24, // ✅ 每个实例数据共 6 个 float：2 + 4 = 24 字节
+    stepMode: "instance",
+    attributes: [
+      { shaderLocation: 1, format: "float32x2", offset: 0 },   // center
+      { shaderLocation: 2, format: "float32",   offset: 8 },   // u0
+      { shaderLocation: 3, format: "float32",   offset: 12 },  // u1
+      { shaderLocation: 4, format: "float32",   offset: 16 },  // v0
+      { shaderLocation: 5, format: "float32",   offset: 20 }   // v1
+    ]
+  }
+], "triangle-strip");
 
     // === 控制视图变换
     let scale = 1;
@@ -504,7 +512,7 @@ fn image_frag(input: Out) -> @location(0) vec4<f32> {
         pass.setPipeline(charPipeline);
         pass.setVertexBuffer(0, charQuadBuffer);
         pass.setVertexBuffer(1, charInstanceBuffer);
-        pass.draw(4, data.charData.length / 4);
+        pass.draw(4, data.charData.length / 6);
 
 
 
@@ -604,18 +612,38 @@ function generateDigitTextureCanvas() {
 
 function generateCharTextureCanvas(charList) {
     const fontSize = 72;
-    const padding = fontSize * 0.4;
+    const padding = 20;
+    const maxTextureWidth = 8192;
 
     const ctx = document.createElement("canvas").getContext("2d");
     ctx.font = `${fontSize}px sans-serif`;
 
     const charWidths = charList.map(ch => ctx.measureText(ch).width + 2 * padding);
-    const totalWidth = charWidths.reduce((a, b) => a + b, 0);
-    const cellH = fontSize * 2;
+    const cellHeights = fontSize * 1.8;
+
+    // 累积宽度，自动换行
+    const rows = [];
+    let currentRow = [];
+    let currentRowWidth = 0;
+
+    for (let i = 0; i < charList.length; i++) {
+        const w = charWidths[i];
+        if (currentRowWidth + w > maxTextureWidth) {
+            rows.push(currentRow);
+            currentRow = [];
+            currentRowWidth = 0;
+        }
+        currentRow.push({ char: charList[i], width: w });
+        currentRowWidth += w;
+    }
+    if (currentRow.length > 0) rows.push(currentRow);
+
+    const canvasWidth = maxTextureWidth;
+    const canvasHeight = rows.length * cellHeights;
 
     const canvas = document.createElement("canvas");
-    canvas.width = totalWidth;
-    canvas.height = cellH;
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
 
     const ctx2 = canvas.getContext("2d", { alpha: true });
     ctx2.clearRect(0, 0, canvas.width, canvas.height);
@@ -625,16 +653,21 @@ function generateCharTextureCanvas(charList) {
     ctx2.textBaseline = "middle";
 
     const uvMap = {};
-    let offsetX = 0;
-    for (let i = 0; i < charList.length; i++) {
-        const ch = charList[i];
-        const width = charWidths[i];
-        const x = offsetX + padding;
-        const y = cellH / 2;
-        ctx2.fillText(ch, x, y);
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+        let x = 0;
+        const row = rows[rowIndex];
+        for (const item of row) {
+            const y = rowIndex * cellHeights + cellHeights / 2;
+            ctx2.fillText(item.char, x + padding, y);
 
-        uvMap[ch] = [offsetX / totalWidth, (offsetX + width) / totalWidth];
-        offsetX += width;
+            const u0 = x / canvas.width;
+            const u1 = (x + item.width) / canvas.width;
+            const v0 = rowIndex * cellHeights / canvas.height;
+            const v1 = (rowIndex * cellHeights + cellHeights) / canvas.height;
+
+            uvMap[item.char] = [u0, u1, v0, v1];
+            x += item.width;
+        }
     }
 
     return { canvas, uvMap };
@@ -691,19 +724,34 @@ function uploadTextureByImageData(device, canvas) {
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const rgba = new Uint8Array(imageData.data);
 
+    const bytesPerPixel = 4;
+    const unpaddedBytesPerRow = canvas.width * bytesPerPixel;
+    const paddedBytesPerRow = Math.ceil(unpaddedBytesPerRow / 256) * 256;
+
+    const paddedData = new Uint8Array(paddedBytesPerRow * canvas.height);
+
+    // 每行拷贝原始数据 → paddedData
+    for (let y = 0; y < canvas.height; y++) {
+        const srcOffset = y * unpaddedBytesPerRow;
+        const dstOffset = y * paddedBytesPerRow;
+        paddedData.set(rgba.subarray(srcOffset, srcOffset + unpaddedBytesPerRow), dstOffset);
+    }
+
     const texture = device.createTexture({
         size: [canvas.width, canvas.height],
         format: "rgba8unorm",
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
     });
 
     device.queue.writeTexture(
         { texture },
-        rgba,
-        { bytesPerRow: canvas.width * 4 },
+        paddedData,
+        {
+            bytesPerRow: paddedBytesPerRow,
+            rowsPerImage: canvas.height
+        },
         [canvas.width, canvas.height]
     );
-
     return texture;
 }
 
@@ -749,8 +797,8 @@ function extractDataFromG6(graph, canvas, uvMap) {
 
         for (let i = 0; i < idStr.length; i++) {
             const ch = idStr[i];
-            const [u0, u1] = uvMap[ch] || [0, 0.1];
-            chars.push(baseX + i * step, y + STYLE.charShiftY, u0, u1);//含有字符相对节点位置的y偏移
+            const [u0, u1, v0, v1] = uvMap[ch] || [0, 0.1, 0, 1];
+            chars.push(baseX + i * step, y + STYLE.charShiftY, u0, u1, v0, v1);
         }
 
     });
