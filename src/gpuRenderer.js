@@ -20,9 +20,9 @@ const STYLE = {
     arrowColor: [0.3, 0.3, 0.3, 1.0],
     arrowSize: 0.03,             // 箭头大小
     charShiftY: -0.05,
-    ringColor:[0.6, 0.6, 0.6, 0.6],
-    ringInnerColor:[0.6, 0.2, 0.8, 0.0],
-    ringHighlightColor:[0.6, 0.6, 0.6, 0.9]
+    ringColor: [0.6, 0.6, 0.6, 0.6],
+    ringInnerColor: [0.6, 0.2, 0.8, 0.0],
+    ringHighlightColor: [0.6, 0.6, 0.6, 0.9]
 };
 export async function initWebGPU(graph) {
     if (!navigator.gpu) {
@@ -31,8 +31,8 @@ export async function initWebGPU(graph) {
     }
 
     const adapter = await navigator.gpu.requestAdapter();
-    const limits = adapter.limits;
-    console.log("maxSampleCount:", limits.maxSampledTexturesPerShaderStage);
+    // const limits = adapter.limits;
+    // console.log("maxSampleCount:", limits.maxSampledTexturesPerShaderStage);
     const device = await adapter.requestDevice();
     device.addEventListener("uncapturederror", e => {
         console.error("GPU ERROR:", e.error);
@@ -42,6 +42,14 @@ export async function initWebGPU(graph) {
     const format = navigator.gpu.getPreferredCanvasFormat();
 
     context.configure({ device, format, alphaMode: "opaque" });
+    //↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑加载全局资源
+
+
+    const pickTexture = device.createTexture({
+        size: [canvas.width, canvas.height],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
 
     const chars = collectCharsFromGraph(graph)
     const { texture: fontTexture, sampler: fontSampler, uvMap } = await generateDigitTexture(device, chars);
@@ -54,6 +62,7 @@ export async function initWebGPU(graph) {
 
     const imageInstances = graph.nodes.map(node => {
         const [x, y] = [(node.x / canvas.width) * 2 - 1, 1 - (node.y / canvas.height) * 2];
+        // const [x, y] = [0,0];
         const w = (node.size / canvas.width * 2) * 0.5;
         const h = (node.size / canvas.height * 2) * 0.5;
         const uv = imageUVMap["../data/1.png"] || [0, 0.1, 0, 0.1];
@@ -65,10 +74,12 @@ export async function initWebGPU(graph) {
         const radius = (node.size / canvas.width * 2) * 1.25; // 你可以设置为 size / 2 或其他
         const strokeWidth = 0.2; // 20% 的宽度
         return [x, y, radius, strokeWidth];
-    }).flat(); 
+    }).flat();
 
 
     const data = extractDataFromG6(graph, canvas, uvMap);
+
+    //↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑图元需要的额外资源
 
     // === Uniforms
     const viewMatrix = mat3.create();
@@ -106,6 +117,8 @@ export async function initWebGPU(graph) {
         ]
     });
 
+
+    //↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑绑定组布局
     // === Shader
     const shaderModule = device.createShaderModule({
         code: `
@@ -424,6 +437,8 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
     console.log("charData example:", data.charData.slice(0, 12));
     const expectedBytes = data.charData.length * Float32Array.BYTES_PER_ELEMENT;
     console.log("charInstanceBuffer size:", expectedBytes);
+
+
     // === 创建 pipelines（矩形、边、箭头、字符）
     const rectPipeline = createPipeline(device, shaderModule, pipelineLayout, format, "rect_vertex", "fragment_main", [
         { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
@@ -487,37 +502,29 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
         device.queue.writeBuffer(uniformBuffer, 0, mat4);
     };
 
+
+
     // === 交互
     const hoverSize = 0.01;
     canvas.addEventListener("wheel", e => {
         e.preventDefault();
 
-        const zoomStep = 0.03 // 动态步长（随scale增大而减小）
-        let newScale = e.deltaY < 0 ? scale + zoomStep : scale - zoomStep;
-        newScale = Math.min(Math.max(newScale, 0.05), 20)
-        const worldX = (hoverPos1[0] + hoverPos2[0]) / 2
-        const worldY = (hoverPos1[1] + hoverPos2[1]) / 2
-        console.log(worldX, worldY);
+        const zoomStep = 0.1 // 动态步长（随scale增大而减小）
+        let newScale = e.deltaY < 0 ? scale * (1 + zoomStep) : scale * (1 - zoomStep);
+        const worldXbefore = (hoverPos1[0] + hoverPos2[0]) / 2
+        const worldYbefore = (hoverPos1[1] + hoverPos2[1]) / 2
+        console.log("before", worldXbefore, worldYbefore);
+        console.log(offset);
 
-        offset[0] -= (worldX - offset[0]) * (newScale / scale - 1);
-        offset[1] -= (worldY - offset[1]) * (newScale / scale - 1);
+
+        // offset[0] -= (worldXbefore - offset[0]) * (newScale / scale - 1);
+        // offset[1] -= (worldYbefore - offset[1]) * (newScale / scale - 1);
         scale = newScale;
 
         updateMatrix();
         const rect = canvas.getBoundingClientRect();
         const x = (e.clientX - rect.left) / canvas.width * 2 - 1;
         const y = 1 - (e.clientY - rect.top) / canvas.height * 2;
-        const inv = mat3.create();
-        if (mat3.invert(inv, viewMatrix)) {
-            const worldX = inv[0] * x + inv[3] * y + inv[6];
-            const worldY = inv[1] * x + inv[4] * y + inv[7];
-
-            hoverPos1 = [worldX - hoverSize / 2, worldY + hoverSize / 2]; // 左上角
-            hoverPos2 = [worldX + hoverSize / 2, worldY - hoverSize / 2]; // 右下角
-        } else {
-            hoverPos1 = [999, 999];
-            hoverPos2 = [999, 999];
-        }
     });
 
 
@@ -532,6 +539,7 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
         if (mat3.invert(inv, viewMatrix)) {
             const worldX = inv[0] * x + inv[3] * y + inv[6];
             const worldY = inv[1] * x + inv[4] * y + inv[7];
+            // console.log("moveto", worldX, worldY);
 
             hoverPos1 = [worldX - hoverSize / 2, worldY + hoverSize / 2]; // 左上角
             hoverPos2 = [worldX + hoverSize / 2, worldY - hoverSize / 2]; // 右下角

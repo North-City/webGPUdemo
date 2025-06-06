@@ -8,6 +8,7 @@ import * as G6 from '@antv/g6';
 import { Renderer as SVGRenderer } from '@antv/g-svg';
 import { Renderer as WebGLRenderer } from '@antv/g-webgl';
 import originData from '../data/data-11W.csv';
+// import dummyData from "../data/data_11W_dummy.json"
 import data1 from '../data/data_one'
 import data2 from '../data/data_two'
 
@@ -74,7 +75,7 @@ console.log(eList);
 
 
 let data
-const show = "large"
+const show = "JA2"
 switch (show) {
   case "large":
     data = {
@@ -86,24 +87,6 @@ switch (show) {
       }),
       edges: eList,
     }
-    // d3.csv("./data/data-11W.csv").then(function (data) {
-    //   // 2. 数据加载成功后的回调函数
-    //   console.log("原始数据：", data);
-
-    //   // 3. 处理数据（例如，将字符串转换为数字）
-    //   data.forEach(function (d) {
-    //     d.value = +d.value; // 将 value 列转换为数字
-    //   });
-
-    //   // 4. 打印处理后的数据
-    //   console.log("处理后的数据：", data);
-
-    //   // 5. 使用数据（例如，绘制图表）
-    //   // 这里可以调用 D3 的绘图方法
-    // }).catch(function (error) {
-    //   // 6. 处理错误
-    //   console.error("加载 CSV 文件时出错：", error);
-    // });
     break;
   case "JA1":
     data = data1
@@ -111,8 +94,68 @@ switch (show) {
   case "JA2":
     data = data2
     break;
+  case "dummy":
+    data = dummyData
+    break
+  case "makeDummy":
+    data = {
+      nodes: cardID.map(d => ({
+        id: d,
+        label: d
+      })),
+      edges: eList,
+    };
+
+    // === 封装函数：添加假节点和假边 ===
+    function augmentGraph(data, dummyNodeCount, dummyEdgeCount) {
+      const existingNodeIds = data.nodes.map(n => n.id);
+
+      // 生成假节点
+      const dummyNodes = Array.from({ length: dummyNodeCount }, (_, i) => {
+        const id = `dummy_${i}`;
+        return { id, label: id };
+      });
+
+      // 合并所有节点 id（用于生成边）
+      const allNodeIds = existingNodeIds.concat(dummyNodes.map(n => n.id));
+
+      // 生成假边
+      const dummyEdges = [];
+      for (let i = 0; i < dummyEdgeCount; i++) {
+        let source, target;
+        do {
+          source = allNodeIds[Math.floor(Math.random() * allNodeIds.length)];
+          target = allNodeIds[Math.floor(Math.random() * allNodeIds.length)];
+        } while (source === target); // 避免自环边
+
+        dummyEdges.push({ source, target });
+      }
+
+      // 合并进原始数据
+      data.nodes.push(...dummyNodes);
+      data.edges.push(...dummyEdges);
+    }
+
+    // === 调用函数添加点边 ===
+    augmentGraph(data, 25, 2300);
+    function downloadJSON(data, filename = "graph_data.json") {
+  const jsonStr = JSON.stringify(data, null, 2); // 美化格式缩进
+  const blob = new Blob([jsonStr], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+
+  URL.revokeObjectURL(url); // 清理 URL 对象
 }
 
+// 调用导出
+downloadJSON(data);
+    break
+
+}
 
 
 
@@ -161,14 +204,13 @@ const graph = new G6.Graph({
   }
 });
 graph.data(data);
-await graph.render();
+graph.render();
 let dataForGPU = {
-  nodes: graph.cfg.data.nodes.map((d) => {if(d.size.length){d.size = d.size[0]} return d}),
+  nodes: graph.cfg.data.nodes.map((d) => { if (d.size.length) { d.size = d.size[0] } return d }),
   edges: graph.cfg.data.edges
 }
 console.log("dataForGPU", dataForGPU);
 
-// let dagreGraph = dagreLayout({nodes:cardID, edges:eList})
 initWebGPU(dataForGPU);
 
 
