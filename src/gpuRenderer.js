@@ -24,6 +24,8 @@ const STYLE = {
     ringInnerColor: [0.6, 0.2, 0.8, 0.0],
     ringHighlightColor: [0.6, 0.6, 0.6, 0.9]
 };
+let undoStack = []
+let redoStack = []
 export async function initWebGPU(graph) {
     if (!navigator.gpu) {
         alert("WebGPU not supported");
@@ -57,27 +59,10 @@ export async function initWebGPU(graph) {
     const { canvas: imageCanvas, uvMap: imageUVMap } = await generateImageAtlas(imageList);
     const imageTexture = uploadTextureByImageData(device, imageCanvas);
     const imageSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
-    // 偏移量（贴图相对矩形中心位置）
-    const imageOffset = -0.0;
-
-    const imageInstances = graph.nodes.map(node => {
-        const [x, y] = [(node.x / canvas.width) * 2 - 1, 1 - (node.y / canvas.height) * 2];
-        // const [x, y] = [0,0];
-        const w = (node.size / canvas.width * 2) * 0.5;
-        const h = (node.size / canvas.height * 2) * 0.5;
-        const uv = imageUVMap["../data/1.png"] || [0, 0.1, 0, 0.1];
-        return [x + imageOffset, y + imageOffset, w, h, ...uv];
-    }).flat();
-
-    const ringInstances = graph.nodes.map(node => {
-        const [x, y] = [(node.x / canvas.width) * 2 - 1, 1 - (node.y / canvas.height) * 2];
-        const radius = (node.size / canvas.width * 2) * 1.25; // 你可以设置为 size / 2 或其他
-        const strokeWidth = 0.2; // 20% 的宽度
-        return [x, y, radius, strokeWidth];
-    }).flat();
 
 
-    const data = extractDataFromG6(graph, canvas, uvMap);
+
+    const data = extractDataFromG6(graph, canvas, uvMap, imageUVMap);
 
     //↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑图元需要的额外资源
 
@@ -141,6 +126,7 @@ export async function initWebGPU(graph) {
         @location(1) uv : vec2<f32>,
         @location(2) strokeWidth : f32,
         @location(3) isHighlight: f32, // 1.0 表示高亮，0.0 表示普通
+        @location(4) selected: f32,
       };
 
       struct VertexIn {
@@ -148,10 +134,12 @@ export async function initWebGPU(graph) {
         @location(1) instPos: vec2<f32>,
         @location(2) instSize: vec2<f32>,
         @location(3) instColor: vec4<f32>,
+        @location(4) pickColor: vec4<f32>,
+        @location(5) selected: f32
       };
 
       struct SimpleIn {
-        @location(0) pos: vec2<f32>,
+        @location(0) pos: vec2<f32>
       };
 
       struct ArrowIn {
@@ -166,7 +154,9 @@ export async function initWebGPU(graph) {
         @location(2) u0: f32,
         @location(3) u1: f32,
         @location(4) v0: f32,
-        @location(5) v1: f32
+        @location(5) v1: f32,
+        @location(6) pickColor: vec4<f32>,
+        @location(7) selected: f32
       };
       struct ImageIn {
         @location(0) pos: vec2<f32>,
@@ -176,12 +166,16 @@ export async function initWebGPU(graph) {
         @location(4) u1: f32,
         @location(5) v0: f32,
         @location(6) v1: f32,
+        @location(7) pickColor: vec4<f32>,
+        @location(8) selected: f32
         };
 struct RingIn {
   @location(0) pos: vec2<f32>,
   @location(1) center: vec2<f32>,
   @location(2) radius: f32,
-  @location(3) strokeWidth: f32
+  @location(3) strokeWidth: f32,
+        @location(4) pickColor: vec4<f32>,
+        @location(5) selected: f32
 };
 
 fn distanceSquared(a: vec2<f32>, b: vec2<f32>) -> f32 {
@@ -273,6 +267,7 @@ fn char_vertex(input: CharIn) -> Out {
     mix(input.u0, input.u1, input.pos.x * 0.5 + 0.5),
     mix(input.v0, input.v1, input.pos.y * -0.5 + 0.5)
   );
+  out.selected = input.selected;
   return out;
 }
 
@@ -297,12 +292,17 @@ fn ring_vertex(input: RingIn) -> Out {
   let closestX = clamp(cx, hoverLeft, hoverRight);
   let closestY = clamp(cy, hoverBottom, hoverTop);
   let distSq = (cx - closestX) * (cx - closestX) + (cy - closestY) * (cy - closestY);
-  let isIntersecting = distSq <= r * r / 4;
+  let isHover = distSq <= r * r / 4;
+
+  let isSelected = input.selected > 0.0;
+
+  let shouldHighlight = isHover || isSelected;
 
   let baseColor = vec4<f32>(${STYLE.ringColor.join(", ")});
-  let highlightColor = vec4<f32>(${STYLE.ringHighlightColor.join(", ")}); // 红色高亮
-  out.color = select(baseColor, highlightColor, isIntersecting);
-  out.isHighlight = select(0.0, 1.0, isIntersecting);
+  let highlightColor = vec4<f32>(${STYLE.ringHighlightColor.join(", ")});
+
+  out.color = select(baseColor, highlightColor, shouldHighlight);
+  out.isHighlight = select(0.0, 1.0, shouldHighlight);
   return out;
 }
 
@@ -320,7 +320,12 @@ fn ring_vertex(input: RingIn) -> Out {
             discard; // ✅ 透明区域不绘制
         }
 
-        let fontColor = vec4<f32>(${STYLE.charColor.join(", ")}); // 白色字
+        var fontColor = vec4<f32>(${STYLE.charColor.join(", ")});
+
+        if(input.selected > 0.0) {
+            fontColor =  vec4<f32>(1.0, 0.0, 0.0, 1.0);
+        } 
+        
         return vec4<f32>(fontColor.rgb, fontColor.a * tex.a);
         }
 
@@ -370,7 +375,7 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
   var finalColor = baseColor;
   var finalAlpha = baseAlpha;
 
-  // ✅ 只对 r ≥ inner 的区域执行颜色合成（防止中心发红）
+  // 只对 r ≥ inner 的区域执行颜色合成（防止中心发红）
   if (r >= inner) {
     finalColor = mix(baseColor, highlightColor, highlightAlpha);
     finalAlpha = max(baseAlpha, highlightAlpha * highlightColor.a);
@@ -380,8 +385,18 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
 }
 
 
-
-
+@vertex
+fn ring_pick_vertex(input: RingIn) -> Out {
+  var out: Out;
+  let world = input.center + input.pos * vec2<f32>(input.radius);
+  out.position = uniforms.viewMatrix * vec4<f32>(world, 0.0, 1.0);
+  out.color = input.pickColor;
+  return out;
+}
+@fragment
+fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
+  return input.color; // color 在 vertex shader 中写入 pickColor
+}
 
 
 
@@ -391,36 +406,14 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
     });
 
     // === 创建各类 buffer（矩形、线段、箭头、字符）
-    const imageInstanceBuffer = createBuffer(device, new Float32Array(imageInstances), GPUBufferUsage.VERTEX);
-    const ringInstanceBuffer = createBuffer(device, new Float32Array(ringInstances), GPUBufferUsage.VERTEX);
+    const imageInstanceBuffer = createBuffer(device, data.imageInstances, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,);
+    const ringInstanceBuffer = createBuffer(device, data.ringInstances, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,);
 
-    const imagePipeline = createPipeline(device, shaderModule, pipelineLayout, format, "image_vertex", "image_frag", [
-        { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
-        {
-            arrayStride: 32, stepMode: "instance", attributes: [
-                { shaderLocation: 1, format: "float32x2", offset: 0 },
-                { shaderLocation: 2, format: "float32x2", offset: 8 },
-                { shaderLocation: 3, format: "float32", offset: 16 },
-                { shaderLocation: 4, format: "float32", offset: 20 },
-                { shaderLocation: 5, format: "float32", offset: 24 },
-                { shaderLocation: 6, format: "float32", offset: 28 }
-            ]
-        }
-    ], "triangle-strip");
-    const ringPipeline = createPipeline(device, shaderModule, pipelineLayout, format, "ring_vertex", "ring_frag", [
-        { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
-        {
-            arrayStride: 16, stepMode: "instance", attributes: [
-                { shaderLocation: 1, format: "float32x2", offset: 0 },
-                { shaderLocation: 2, format: "float32", offset: 8 },
-                { shaderLocation: 3, format: "float32", offset: 12 }
-            ]
-        }
-    ], "triangle-strip");
+
     const quad = new Float32Array([-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5]);
     const quadBuffer = createBuffer(device, quad, GPUBufferUsage.VERTEX);
 
-    const rectBuffer = createBuffer(device, data.rects, GPUBufferUsage.VERTEX);
+    const rectBuffer = createBuffer(device, data.rects, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,);
     const lineBuffer = createBuffer(device, data.polylines, GPUBufferUsage.VERTEX);
     const arrowVertexBuffer = createBuffer(device, new Float32Array([
         0.0, 0.0,
@@ -432,7 +425,7 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
         -0.5, -0.5, 0.5, -0.5,
         -0.5, 0.5, 0.5, 0.5
     ]), GPUBufferUsage.VERTEX);
-    const charInstanceBuffer = createBuffer(device, data.charData, GPUBufferUsage.VERTEX);
+    const charInstanceBuffer = createBuffer(device, data.charData, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,);
     console.log("charData length:", data.charData.length);
     console.log("charData example:", data.charData.slice(0, 12));
     const expectedBytes = data.charData.length * Float32Array.BYTES_PER_ELEMENT;
@@ -443,17 +436,19 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
     const rectPipeline = createPipeline(device, shaderModule, pipelineLayout, format, "rect_vertex", "fragment_main", [
         { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
         {
-            arrayStride: 32, stepMode: "instance", attributes: [
+            arrayStride: 52, stepMode: "instance", attributes: [
                 { shaderLocation: 1, format: "float32x2", offset: 0 },
                 { shaderLocation: 2, format: "float32x2", offset: 8 },
-                { shaderLocation: 3, format: "float32x4", offset: 16 }
+                { shaderLocation: 3, format: "float32x4", offset: 16 },
+                { shaderLocation: 4, format: "float32x4", offset: 32 },
+                { shaderLocation: 5, format: "float32", offset: 48 }
             ]
         }
-    ], "triangle-strip");
+    ], "triangle-strip", sampleCount);
 
     const linePipeline = createPipeline(device, shaderModule, pipelineLayout, format, "simple_vertex", "fragment_main", [
         { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] }
-    ], "line-list");
+    ], "line-list", sampleCount);
 
     const arrowPipeline = createPipeline(device, shaderModule, pipelineLayout, format, "arrow_vertex", "fragment_main", [
         { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
@@ -463,22 +458,51 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
                 { shaderLocation: 2, format: "float32x2", offset: 8 }
             ]
         }
-    ], "triangle-list");
+    ], "triangle-list", sampleCount);
 
     const charPipeline = createPipeline(device, shaderModule, pipelineLayout, format, "char_vertex", "char_frag", [
         { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
         {
-            arrayStride: 24, // ✅ 每个实例数据共 6 个 float：2 + 4 = 24 字节
+            arrayStride: 44, // ✅ 每个实例数据共 6 个 float：2 + 4 = 24 字节
             stepMode: "instance",
             attributes: [
                 { shaderLocation: 1, format: "float32x2", offset: 0 },   // center
                 { shaderLocation: 2, format: "float32", offset: 8 },   // u0
                 { shaderLocation: 3, format: "float32", offset: 12 },  // u1
                 { shaderLocation: 4, format: "float32", offset: 16 },  // v0
-                { shaderLocation: 5, format: "float32", offset: 20 }   // v1
+                { shaderLocation: 5, format: "float32", offset: 20 },   // v1
+                { shaderLocation: 6, format: "float32x4", offset: 24 },
+                { shaderLocation: 7, format: "float32", offset: 40 }
             ]
         }
-    ], "triangle-strip");
+    ], "triangle-strip", sampleCount);
+    const imagePipeline = createPipeline(device, shaderModule, pipelineLayout, format, "image_vertex", "image_frag", [
+        { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
+        {
+            arrayStride: 52, stepMode: "instance", attributes: [
+                { shaderLocation: 1, format: "float32x2", offset: 0 },
+                { shaderLocation: 2, format: "float32x2", offset: 8 },
+                { shaderLocation: 3, format: "float32", offset: 16 },
+                { shaderLocation: 4, format: "float32", offset: 20 },
+                { shaderLocation: 5, format: "float32", offset: 24 },
+                { shaderLocation: 6, format: "float32", offset: 28 },
+                { shaderLocation: 7, format: "float32x4", offset: 32 },
+                { shaderLocation: 8, format: "float32", offset: 48 }
+            ]
+        }
+    ], "triangle-strip", sampleCount);
+    const ringPipeline = createPipeline(device, shaderModule, pipelineLayout, format, "ring_vertex", "ring_frag", [
+        { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
+        {
+            arrayStride: 36, stepMode: "instance", attributes: [
+                { shaderLocation: 1, format: "float32x2", offset: 0 },
+                { shaderLocation: 2, format: "float32", offset: 8 },
+                { shaderLocation: 3, format: "float32", offset: 12 },
+                { shaderLocation: 4, format: "float32x4", offset: 16 },
+                { shaderLocation: 5, format: "float32", offset: 32 }
+            ]
+        }
+    ], "triangle-strip", sampleCount);
 
     // === 控制视图变换
     let scale = 1;
@@ -527,8 +551,89 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
         const y = 1 - (e.clientY - rect.top) / canvas.height * 2;
     });
 
+    canvas.addEventListener("click", async e => {
+        const rect = canvas.getBoundingClientRect();
+        const px = Math.floor((e.clientX - rect.left) * devicePixelRatio);
+        const py = Math.floor((e.clientY - rect.top) * devicePixelRatio);
+
+        // 执行 pick 渲染
+        await renderPick(device, bindGroup, shaderModule, ringInstanceBuffer, quadBuffer, pickTexture, pipelineLayout, data);
+
+        // 读取 `pickTexture` 中的像素值
+        const readBuffer = device.createBuffer({
+            size: 4,  // 1像素 RGBA 数据
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+
+        const encoder = device.createCommandEncoder();
+        encoder.copyTextureToBuffer(
+            { texture: pickTexture, origin: { x: px, y: py } },
+            { buffer: readBuffer, bytesPerRow: 256 },
+            [1, 1, 1]
+        );
+        device.queue.submit([encoder.finish()]);
+
+        // 读取并解析像素数据
+        await readBuffer.mapAsync(GPUMapMode.READ);
+        const array = new Uint8Array(readBuffer.getMappedRange());
+        const [r, g, b, a] = array;
+        readBuffer.unmap();
+
+        const id = decodeColorToId(r, g, b);
+        console.log("点击选中 ring ID:", id);
+        if (id === 0) return
+        const select = true
+        undoStack.push(id);
+        redoStack = [];
+        markSelectedById(id, data.rects, 13, -1, select);
+        device.queue.writeBuffer(rectBuffer, 0, data.rects.buffer);
+
+        markSelectedById(id, data.ringInstances, 9, -1, select);
+        device.queue.writeBuffer(ringInstanceBuffer, 0, data.ringInstances.buffer);
+
+        markSelectedById(id, data.imageInstances, 13, -1, select);
+        device.queue.writeBuffer(imageInstanceBuffer, 0, data.imageInstances.buffer);
+
+        markSelectedById(id, data.charData, 11, -1, select);
+        device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
+    });
 
 
+    window.addEventListener("keydown", e => {
+        if (e.ctrlKey && e.key === 'z') {
+            if(!undoStack.length) return 
+            let id = undoStack.pop()
+            redoStack.push(id)
+            const select = false
+            markSelectedById(id, data.rects, 13, -1, select);
+            device.queue.writeBuffer(rectBuffer, 0, data.rects.buffer);
+
+            markSelectedById(id, data.ringInstances, 9, -1, select);
+            device.queue.writeBuffer(ringInstanceBuffer, 0, data.ringInstances.buffer);
+
+            markSelectedById(id, data.imageInstances, 13, -1, select);
+            device.queue.writeBuffer(imageInstanceBuffer, 0, data.imageInstances.buffer);
+
+            markSelectedById(id, data.charData, 11, -1, select);
+            device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
+        } else if (e.ctrlKey && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) {
+            if(!redoStack.length) return 
+            let id = redoStack.pop()
+            undoStack.push(id)
+            const select = true
+            markSelectedById(id, data.rects, 13, -1, select);
+            device.queue.writeBuffer(rectBuffer, 0, data.rects.buffer);
+
+            markSelectedById(id, data.ringInstances, 9, -1, select);
+            device.queue.writeBuffer(ringInstanceBuffer, 0, data.ringInstances.buffer);
+
+            markSelectedById(id, data.imageInstances, 13, -1, select);
+            device.queue.writeBuffer(imageInstanceBuffer, 0, data.imageInstances.buffer);
+
+            markSelectedById(id, data.charData, 11, -1, select);
+            device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
+        }
+    });
     canvas.addEventListener("mousedown", e => { dragging = true; last = [e.clientX, e.clientY]; });
     canvas.addEventListener("mouseup", () => dragging = false);
     canvas.addEventListener("mousemove", e => {
@@ -591,7 +696,6 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
             });
         }
 
-
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
                 view: msaaTexture.createView(),  // 渲染到 MSAA 纹理
@@ -611,12 +715,12 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
         pass.setPipeline(rectPipeline);
         pass.setVertexBuffer(0, quadBuffer);
         pass.setVertexBuffer(1, rectBuffer);
-        pass.draw(4, data.rects.length / 8);
+        pass.draw(4, data.rects.length / 13);
 
         pass.setPipeline(imagePipeline);
         pass.setVertexBuffer(0, quadBuffer);
         pass.setVertexBuffer(1, imageInstanceBuffer);
-        pass.draw(4, imageInstances.length / 8); // 每个 instance 8 个 float
+        pass.draw(4, data.imageInstances.length / 13); // 每个 instance 8 个 float
 
         pass.setPipeline(arrowPipeline);
         pass.setVertexBuffer(0, arrowVertexBuffer);
@@ -626,12 +730,12 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
         pass.setPipeline(charPipeline);
         pass.setVertexBuffer(0, charQuadBuffer);
         pass.setVertexBuffer(1, charInstanceBuffer);
-        pass.draw(4, data.charData.length / 6);
+        pass.draw(4, data.charData.length / 11);
 
         pass.setPipeline(ringPipeline);
         pass.setVertexBuffer(0, quadBuffer);           // [-0.5, -0.5] ~ [0.5, 0.5]
         pass.setVertexBuffer(1, ringInstanceBuffer);   // 圆环数据
-        pass.draw(4, ringInstances.length / 4);
+        pass.draw(4, data.ringInstances.length / 9);
 
         pass.end();
         device.queue.submit([encoder.finish()]);
@@ -654,7 +758,7 @@ function createBuffer(device, data, usage) {
     return buffer;
 }
 
-function createPipeline(device, module, layout, format, vert, frag, buffers, topology) {
+function createPipeline(device, module, layout, format, vert, frag, buffers, topology, sampleCount) {
     return device.createRenderPipeline({
         layout,
         vertex: { module, entryPoint: vert, buffers },
@@ -884,14 +988,20 @@ function createCharUVMap(charList) {
 }
 
 
-function extractDataFromG6(graph, canvas, uvMap) {
+function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
     function scale(px, py) {
         return [(px / canvas.width) * 2 - 1, 1 - (py / canvas.height) * 2];
     }
 
-    let rects = [], polylines = [], arrows = [], chars = [];
+    let rects = [], polylines = [], arrows = [], chars = [], imageInstances = [], ringInstances = [];
+    // 偏移量（贴图相对矩形中心位置）
+    const imageOffset = -0.0;
+    const strokeWidth = 0.2; // 20% 的宽度
 
-    graph.nodes.forEach(node => {
+    graph.nodes.forEach((node, index) => {
+        const nodeID = encodeIdToColor(index + 1); console.log(nodeID);
+
+        const selected = 0;
         const [x, y] = scale(node.x, node.y);
         const w = node.size / canvas.width * 2;//for JinAn data
         const h = node.size / canvas.height * 2;
@@ -899,11 +1009,8 @@ function extractDataFromG6(graph, canvas, uvMap) {
         // const h = node.size[1] / canvas.height * 2;
         // const w = node.width / canvas.width * 2;//for GPU
         // const h = node.height / canvas.height * 2;
-        rects.push(x, y, w, h, ...STYLE.nodeColor);
-        if (Number.isNaN(x) || Number.isNaN(y) || Number.isNaN(w) || Number.isNaN(h) || w == 0 || h == 0) {
-            console.log(x, y, w, h);
+        rects.push(x, y, w, h, ...STYLE.nodeColor, ...nodeID, selected);
 
-        }
 
 
         const idStr = node.label.toString();
@@ -915,9 +1022,15 @@ function extractDataFromG6(graph, canvas, uvMap) {
         for (let i = 0; i < idStr.length; i++) {
             const ch = idStr[i];
             const [u0, u1, v0, v1] = uvMap[ch] || [0, 0.1, 0, 1];
-            chars.push(baseX + i * step, y + STYLE.charShiftY, u0, u1, v0, v1);
+            chars.push(baseX + i * step, y + STYLE.charShiftY, u0, u1, v0, v1, ...nodeID, selected);
         }
 
+
+        const uv = imageUVMap["../data/1.png"] || [0, 0.1, 0, 0.1];
+        imageInstances.push(x + imageOffset, y + imageOffset, w / 2, h / 2, ...uv, ...nodeID, selected)
+
+        const radius = w * 1.25;
+        ringInstances.push(x, y, radius, strokeWidth, ...nodeID, selected)
     });
 
     graph.edges.forEach(edge => {
@@ -930,8 +1043,94 @@ function extractDataFromG6(graph, canvas, uvMap) {
         rects: new Float32Array(rects),
         polylines: new Float32Array(polylines),
         arrowSegments: new Float32Array(arrows),
-        charData: new Float32Array(chars)
+        charData: new Float32Array(chars),
+        imageInstances: new Float32Array(imageInstances),
+        ringInstances: new Float32Array(ringInstances)
     };
+}
+
+function encodeIdToColor(id) {
+    return [
+        (id & 0xff) / 255,
+        ((id >> 8) & 0xff) / 255,
+        ((id >> 16) & 0xff) / 255,
+        1.0 // ✅ 强制 alpha 非 0
+    ];
+}
+
+function decodeColorToId(r, g, b) {
+    return r + (g << 8) + (b << 16); // ✅ 只使用 RGB
+}
+function decodeColorToIdFloat(r, g, b) {
+    return Math.round(r * 255) + (Math.round(g * 255) << 8) + (Math.round(b * 255) << 16);
+}
+
+async function renderPick(device, bindGroup, shaderModule, ringInstanceBuffer, quadBuffer, pickTexture, pipelineLayout, data) {
+    // 创建 pick pipeline
+    const ringPickPipeline = createPipeline(
+        device,
+        shaderModule,
+        pipelineLayout,
+        "rgba8unorm",
+        "ring_pick_vertex", // 使用你定义的 vertex shader
+        "ring_pick_frag",   // 使用输出 pickColor 的 fragment shader
+        [
+            { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
+            {
+                arrayStride: 36, stepMode: "instance", attributes: [
+                    { shaderLocation: 1, format: "float32x2", offset: 0 },    // center
+                    { shaderLocation: 2, format: "float32", offset: 8 },      // radius
+                    { shaderLocation: 3, format: "float32", offset: 12 },     // stroke width
+                    { shaderLocation: 4, format: "float32x4", offset: 16 },   // pickColor
+                    { shaderLocation: 5, format: "float32", offset: 32 }
+                ]
+            }
+        ],
+        "triangle-strip", 1
+    );
+
+    // 创建 command encoder 和 render pass
+    const encoder = device.createCommandEncoder();
+
+    const pickPass = encoder.beginRenderPass({
+        colorAttachments: [{
+            view: pickTexture.createView(),  // 渲染到 pickTexture
+            loadOp: "clear",                 // 清空
+            storeOp: "store",                // 保存渲染结果
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },  // 预设为黑色（未选中）
+            sampleCount: 1              // 禁用 MSAA
+        }]
+    });
+
+    // 设置 bindGroup 和 pipeline
+    pickPass.setBindGroup(0, bindGroup);
+    pickPass.setPipeline(ringPickPipeline);
+    pickPass.setVertexBuffer(0, quadBuffer);
+    pickPass.setVertexBuffer(1, ringInstanceBuffer);  // 设置 ring 实例数据
+    pickPass.draw(4, data.ringInstances.length / 9);  // 渲染所有的 ring
+    pickPass.end();
+
+    // 提交命令
+    device.queue.submit([encoder.finish()]);
+}
+
+//根据ID在data的子数据中找到对应的索引（注意是随机查找，如果里面元素的id不从1开始需要做映射
+// function markSelectedById(id, arr, stride, selectedOffset) {
+//     arr[id * stride + selectedOffset] = 1
+// }
+
+function markSelectedById(id, arr, stride, selectedOffset, select = true) {
+    for (let i = 1; i * stride < arr.length; i++) {
+        let [r, g, b] = [arr[i * stride + selectedOffset - 4], arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2]]
+        if (decodeColorToIdFloat(r, g, b) === id) {
+            if (select) {
+                arr[i * stride + selectedOffset] = 1
+            } else {
+                arr[i * stride + selectedOffset] = 0
+            }
+
+        }
+    }
 }
 
 
