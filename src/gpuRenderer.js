@@ -26,11 +26,17 @@ const STYLE = {
 };
 let undoStack = []
 let redoStack = []
+
+
+
 export async function initWebGPU(graph) {
     if (!navigator.gpu) {
         alert("WebGPU not supported");
         return;
     }
+
+
+
 
     const adapter = await navigator.gpu.requestAdapter();
     // const limits = adapter.limits;
@@ -40,6 +46,21 @@ export async function initWebGPU(graph) {
         console.error("GPU ERROR:", e.error);
     });
     const canvas = document.getElementById("webgpuCanvas");
+
+    // 小地图 Canvas
+    const miniMapCanvas = document.createElement("canvas");
+    miniMapCanvas.width = 300;
+    miniMapCanvas.height = 300;
+    document.body.appendChild(miniMapCanvas);
+    const miniMapContext = miniMapCanvas.getContext("webgpu");
+    // 配置小地图 context
+    const miniMapFormat = navigator.gpu.getPreferredCanvasFormat();
+    miniMapContext.configure({
+        device,
+        format: miniMapFormat,
+        alphaMode: "opaque"
+    });
+
     const context = canvas.getContext("webgpu");
     const format = navigator.gpu.getPreferredCanvasFormat();
 
@@ -73,6 +94,23 @@ export async function initWebGPU(graph) {
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
+    const miniMapViewMatrix = mat3.create(); // 恒定缩放，不变换
+    const miniMapUniformBuffer = device.createBuffer({
+        size: 80,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+
+    // 写入单位矩阵
+    const mat4 = new Float32Array([
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+        999, 999, 999, 999 // 不需要 hover
+    ]);
+    device.queue.writeBuffer(miniMapUniformBuffer, 0, mat4);
+
+
 
 
     const bindGroupLayout = device.createBindGroupLayout({
@@ -102,6 +140,16 @@ export async function initWebGPU(graph) {
         ]
     });
 
+    const miniMapBindGroup = device.createBindGroup({
+        layout: bindGroupLayout,
+        entries: [
+            { binding: 0, resource: { buffer: miniMapUniformBuffer } },
+            { binding: 1, resource: fontTexture.createView() },
+            { binding: 2, resource: fontSampler },
+            { binding: 3, resource: imageTexture.createView() },
+            { binding: 4, resource: imageSampler }
+        ]
+    });
 
     //↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑绑定组布局
     // === Shader
@@ -272,6 +320,15 @@ fn char_vertex(input: CharIn) -> Out {
 }
 
 @vertex
+fn ring_pick_vertex(input: RingIn) -> Out {
+  var out: Out;
+  let world = input.center + input.pos * vec2<f32>(input.radius);
+  out.position = uniforms.viewMatrix * vec4<f32>(world, 0.0, 1.0);
+  out.color = input.pickColor;
+  return out;
+}
+
+@vertex
 fn ring_vertex(input: RingIn) -> Out {
   var out: Out;
   let world = input.center + input.pos * vec2<f32>(input.radius);
@@ -310,6 +367,11 @@ fn ring_vertex(input: RingIn) -> Out {
         @fragment
         fn fragment_main(input: Out) -> @location(0) vec4<f32> {
         return input.color; // 用于矩形、边、箭头
+        }
+
+        @fragment
+        fn fragment_mini(input: Out) -> @location(0) vec4<f32> {
+        return vec4<f32>(1.0, 0.0, 0.0, 1.0); // 用于小地图矩形、边、箭头
         }
 
         @fragment
@@ -385,14 +447,7 @@ fn ring_frag(input: Out) -> @location(0) vec4<f32> {
 }
 
 
-@vertex
-fn ring_pick_vertex(input: RingIn) -> Out {
-  var out: Out;
-  let world = input.center + input.pos * vec2<f32>(input.radius);
-  out.position = uniforms.viewMatrix * vec4<f32>(world, 0.0, 1.0);
-  out.color = input.pickColor;
-  return out;
-}
+
 @fragment
 fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
   return input.color; // color 在 vertex shader 中写入 pickColor
@@ -430,6 +485,8 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
     console.log("charData example:", data.charData.slice(0, 12));
     const expectedBytes = data.charData.length * Float32Array.BYTES_PER_ELEMENT;
     console.log("charInstanceBuffer size:", expectedBytes);
+
+
 
 
     // === 创建 pipelines（矩形、边、箭头、字符）
@@ -504,6 +561,32 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         }
     ], "triangle-strip", sampleCount);
 
+    const miniMapRectPipeline = createPipeline(
+        device,
+        shaderModule,
+        pipelineLayout,
+        format,
+        "rect_vertex",
+        "fragment_mini",
+        [
+            { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
+            {
+                arrayStride: 52, stepMode: "instance", attributes: [
+                    { shaderLocation: 1, format: "float32x2", offset: 0 },
+                    { shaderLocation: 2, format: "float32x2", offset: 8 },
+                    { shaderLocation: 3, format: "float32x4", offset: 16 },
+                    { shaderLocation: 4, format: "float32x4", offset: 32 },
+                    { shaderLocation: 5, format: "float32", offset: 48 }
+                ]
+            }
+        ],
+        "triangle-strip",
+        1  // ✅ 使用 sampleCount: 1
+    );
+    const miniMapLinePipeline = createPipeline(device, shaderModule, pipelineLayout, format, "simple_vertex", "fragment_mini", [
+        { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] }
+    ], "line-list", 1);
+
     // === 控制视图变换
     let scale = 1;
     let offset = [0, 0];
@@ -555,7 +638,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         const rect = canvas.getBoundingClientRect();
         const px = Math.floor((e.clientX - rect.left) * devicePixelRatio);
         const py = Math.floor((e.clientY - rect.top) * devicePixelRatio);
-
+        updateMatrix()
         // 执行 pick 渲染
         await renderPick(device, bindGroup, shaderModule, ringInstanceBuffer, quadBuffer, pickTexture, pipelineLayout, data);
 
@@ -580,7 +663,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         readBuffer.unmap();
 
         const id = decodeColorToId(r, g, b);
-        console.log("点击选中 ring ID:", id);
+        console.log("点击选中 ring ID:", r,g,b,id);
         if (id === 0) return
         const select = true
         undoStack.push(id);
@@ -601,7 +684,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
 
     window.addEventListener("keydown", e => {
         if (e.ctrlKey && e.key === 'z') {
-            if(!undoStack.length) return 
+            if (!undoStack.length) return
             let id = undoStack.pop()
             redoStack.push(id)
             const select = false
@@ -617,7 +700,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
             markSelectedById(id, data.charData, 11, -1, select);
             device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
         } else if (e.ctrlKey && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) {
-            if(!redoStack.length) return 
+            if (!redoStack.length) return
             let id = redoStack.pop()
             undoStack.push(id)
             const select = true
@@ -739,6 +822,34 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
 
         pass.end();
         device.queue.submit([encoder.finish()]);
+
+
+        // === 小地图渲染逻辑 ===
+        const miniMapEncoder = device.createCommandEncoder();
+        const miniMapPass = miniMapEncoder.beginRenderPass({
+            colorAttachments: [{
+                view: miniMapContext.getCurrentTexture().createView(),
+                loadOp: "clear",
+                storeOp: "store",
+                clearValue: { r: 1, g: 1, b: 1, a: 1 }
+            }]
+        });
+        miniMapPass.setBindGroup(0, miniMapBindGroup);
+
+        // 边
+        miniMapPass.setPipeline(miniMapLinePipeline);
+        miniMapPass.setVertexBuffer(0, lineBuffer);
+        miniMapPass.draw(data.polylines.length / 2);
+
+        // 节点矩形
+        miniMapPass.setPipeline(miniMapRectPipeline);
+        miniMapPass.setVertexBuffer(0, quadBuffer);
+        miniMapPass.setVertexBuffer(1, rectBuffer);
+        miniMapPass.draw(4, data.rects.length / 13);
+
+        miniMapPass.end();
+        device.queue.submit([miniMapEncoder.finish()]);
+
         requestAnimationFrame(frame);
     }
 
@@ -1039,6 +1150,8 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
         polylines.push(x1, y1, x2, y2);
         arrows.push(x1, y1, x2, y2);
     });
+    console.log(rects);
+    
     return {
         rects: new Float32Array(rects),
         polylines: new Float32Array(polylines),
