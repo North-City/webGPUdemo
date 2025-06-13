@@ -1,4 +1,4 @@
-import { mat3 } from 'gl-matrix';
+import { mat3, vec2 } from 'gl-matrix';
 // === 全局样式配置 ===
 const sampleCount = 4; // 开启 4 倍 MSAA
 let msaaTexture = null; //  提前声明全局变量
@@ -12,9 +12,11 @@ const STYLE = {
 
     // 节点矩形样式
     nodeColor: [0.6, 0.6, 0.6, 0.1],
+    nodeColor_mini: [0.6, 0.6, 0.6, 1.0],
 
     // 连线样式
     edgeColor: [0.5, 0.5, 0.5, 0.5],
+    edgeColor_mini: [0.5, 0.5, 0.5, 1.0],
 
     // 箭头样式
     arrowColor: [0.3, 0.3, 0.3, 1.0],
@@ -22,11 +24,12 @@ const STYLE = {
     charShiftY: -0.05,
     ringColor: [0.6, 0.6, 0.6, 0.6],
     ringInnerColor: [0.6, 0.2, 0.8, 0.0],
-    ringHighlightColor: [0.6, 0.6, 0.6, 0.9]
+    ringHighlightColor: [0.6, 0.6, 0.6, 0.9],
+
+    viewRectColor: [0.0, 0.0, 1.0, 0.1]
 };
 let undoStack = []
 let redoStack = []
-
 
 
 export async function initWebGPU(graph) {
@@ -48,10 +51,7 @@ export async function initWebGPU(graph) {
     const canvas = document.getElementById("webgpuCanvas");
 
     // 小地图 Canvas
-    const miniMapCanvas = document.createElement("canvas");
-    miniMapCanvas.width = 300;
-    miniMapCanvas.height = 300;
-    document.body.appendChild(miniMapCanvas);
+    const miniMapCanvas = document.getElementById("minimapCanvas");
     const miniMapContext = miniMapCanvas.getContext("webgpu");
     // 配置小地图 context
     const miniMapFormat = navigator.gpu.getPreferredCanvasFormat();
@@ -94,21 +94,16 @@ export async function initWebGPU(graph) {
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
-    const miniMapViewMatrix = mat3.create(); // 恒定缩放，不变换
+    const bounds = getGraphBounds(graph.nodes);  // 获取坐标范围
+    const miniMapViewMatrix = getEquivalentNDCMatrix(bounds);
+
     const miniMapUniformBuffer = device.createBuffer({
         size: 80,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
     // 写入单位矩阵
-    const mat4 = new Float32Array([
-        1, 0, 0, 0,
-        0, 1, 0, 0,
-        0, 0, 1, 0,
-        0, 0, 0, 1,
-        999, 999, 999, 999 // 不需要 hover
-    ]);
-    device.queue.writeBuffer(miniMapUniformBuffer, 0, mat4);
+
 
 
 
@@ -278,6 +273,7 @@ fn rect_vertex(input: VertexIn) -> Out {
   return out;
 }
 
+
       @vertex
       fn simple_vertex(input: SimpleIn) -> Out {
         var out: Out;
@@ -371,7 +367,7 @@ fn ring_vertex(input: RingIn) -> Out {
 
         @fragment
         fn fragment_mini(input: Out) -> @location(0) vec4<f32> {
-        return vec4<f32>(1.0, 0.0, 0.0, 1.0); // 用于小地图矩形、边、箭头
+        return input.color; // 用于小地图矩形、边、箭头
         }
 
         @fragment
@@ -486,7 +482,16 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
     const expectedBytes = data.charData.length * Float32Array.BYTES_PER_ELEMENT;
     console.log("charInstanceBuffer size:", expectedBytes);
 
+    const rectBuffer_mini = createBuffer(device, data.rects_mini, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,);
+    const lineBuffer_mini = createBuffer(device, data.polylines_mini, GPUBufferUsage.VERTEX);
 
+
+
+
+
+    const viewRect = getViewRect(canvas, viewMatrix);
+
+    const viewRectBuffer = createBuffer(device, viewRect, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST);
 
 
     // === 创建 pipelines（矩形、边、箭头、字符）
@@ -608,7 +613,23 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
 
         device.queue.writeBuffer(uniformBuffer, 0, mat4);
     };
-
+    const updateMiniMapMatrix = () => {
+        const mat4 = new Float32Array([
+            miniMapViewMatrix[0], miniMapViewMatrix[1], 0, 0,
+            miniMapViewMatrix[3], miniMapViewMatrix[4], 0, 0,
+            0, 0, 1, 0,
+            miniMapViewMatrix[6], miniMapViewMatrix[7], 0, 1,
+            0, 0, 0, 0  // 小地图通常不用 hoverPos，先填 0
+        ]);
+        // const mat4 = new Float32Array([
+        //     1, 0, 0, 0,
+        //     0, 1, 0, 0,
+        //     0, 0, 1, 0,
+        //     0, 0, 0, 1,
+        //     0, 0, 0, 0  // 小地图通常不用 hoverPos，先填 0
+        // ]);
+        device.queue.writeBuffer(miniMapUniformBuffer, 0, mat4);
+    }
 
 
     // === 交互
@@ -632,6 +653,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         const rect = canvas.getBoundingClientRect();
         const x = (e.clientX - rect.left) / canvas.width * 2 - 1;
         const y = 1 - (e.clientY - rect.top) / canvas.height * 2;
+        device.queue.writeBuffer(viewRectBuffer, 0, getViewRect(canvas, viewMatrix));
     });
 
     canvas.addEventListener("click", async e => {
@@ -663,7 +685,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         readBuffer.unmap();
 
         const id = decodeColorToId(r, g, b);
-        console.log("点击选中 ring ID:", r,g,b,id);
+        console.log("点击选中 ring ID:", r, g, b, id);
         if (id === 0) return
         const select = true
         undoStack.push(id);
@@ -758,6 +780,8 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
             }
 
             last = [e.clientX, e.clientY];
+
+            device.queue.writeBuffer(viewRectBuffer, 0, getViewRect(canvas, viewMatrix));
         }
 
         updateMatrix();
@@ -765,8 +789,12 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
     let dragging = false, last = [0, 0];
     updateMatrix();
 
+    updateMiniMapMatrix()
+
+
     // === 渲染帧
     function frame() {
+
         const encoder = device.createCommandEncoder();
 
         // 🧠 检查是否需要重建 MSAA 纹理（第一次 or 尺寸变了）
@@ -838,14 +866,21 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
 
         // 边
         miniMapPass.setPipeline(miniMapLinePipeline);
-        miniMapPass.setVertexBuffer(0, lineBuffer);
-        miniMapPass.draw(data.polylines.length / 2);
+        miniMapPass.setVertexBuffer(0, lineBuffer_mini);
+        miniMapPass.draw(data.polylines_mini.length / 2);
 
         // 节点矩形
         miniMapPass.setPipeline(miniMapRectPipeline);
         miniMapPass.setVertexBuffer(0, quadBuffer);
-        miniMapPass.setVertexBuffer(1, rectBuffer);
-        miniMapPass.draw(4, data.rects.length / 13);
+        miniMapPass.setVertexBuffer(1, rectBuffer_mini);
+        miniMapPass.draw(4, data.rects_mini.length / 13);
+
+        // 绘制主视图框
+        miniMapPass.setPipeline(miniMapRectPipeline);
+        miniMapPass.setVertexBuffer(0, quadBuffer);
+        miniMapPass.setVertexBuffer(1, viewRectBuffer);
+        miniMapPass.draw(4, 1);
+
 
         miniMapPass.end();
         device.queue.submit([miniMapEncoder.finish()]);
@@ -1104,10 +1139,23 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
         return [(px / canvas.width) * 2 - 1, 1 - (py / canvas.height) * 2];
     }
 
-    let rects = [], polylines = [], arrows = [], chars = [], imageInstances = [], ringInstances = [];
+    let rects = [],
+        polylines = [],
+        arrows = [],
+        chars = [],
+        imageInstances = [],
+        ringInstances = [],
+        rects_mini = [],
+        polylines_mini = [];
     // 偏移量（贴图相对矩形中心位置）
     const imageOffset = -0.0;
     const strokeWidth = 0.2; // 20% 的宽度
+
+    // const bounds = getGraphBounds(graph.nodes);  // 获取坐标范围
+    // const a = getEquivalentNDCMatrix(bounds); console.log("1212", a);
+
+    // const toNDCWithSize = createNDCMapperWithSize(bounds);
+    // const toNDC = createNDCMapper(bounds);
 
     graph.nodes.forEach((node, index) => {
         const nodeID = encodeIdToColor(index + 1); console.log(nodeID);
@@ -1121,8 +1169,9 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
         // const w = node.width / canvas.width * 2;//for GPU
         // const h = node.height / canvas.height * 2;
         rects.push(x, y, w, h, ...STYLE.nodeColor, ...nodeID, selected);
-
-
+        // const [x_mini, y_mini, w_mini, h_mini] = toNDCWithSize(node.x, node.y, node.size);
+        // rects_mini.push(x_mini, y_mini, w_mini, h_mini, ...STYLE.nodeColor, ...nodeID, selected);
+        rects_mini.push(node.x, node.y, node.size, node.size, ...STYLE.nodeColor_mini, ...nodeID, selected);
 
         const idStr = node.label.toString();
         const charSize = STYLE.charSize;
@@ -1149,16 +1198,21 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
         const [x2, y2] = scale(edge.endPoint.x, edge.endPoint.y);
         polylines.push(x1, y1, x2, y2);
         arrows.push(x1, y1, x2, y2);
+        // const [x1_mini, y1_mini] = toNDC(edge.startPoint.x, edge.startPoint.y);
+        // const [x2_mini, y2_mini] = toNDC(edge.endPoint.x, edge.endPoint.y);
+        polylines_mini.push(edge.startPoint.x, edge.startPoint.y, edge.endPoint.x, edge.endPoint.y);
     });
-    console.log(rects);
-    
+
     return {
         rects: new Float32Array(rects),
         polylines: new Float32Array(polylines),
         arrowSegments: new Float32Array(arrows),
         charData: new Float32Array(chars),
         imageInstances: new Float32Array(imageInstances),
-        ringInstances: new Float32Array(ringInstances)
+        ringInstances: new Float32Array(ringInstances),
+
+        rects_mini: new Float32Array(rects_mini),
+        polylines_mini: new Float32Array(polylines_mini)
     };
 }
 
@@ -1247,3 +1301,165 @@ function markSelectedById(id, arr, stride, selectedOffset, select = true) {
 }
 
 
+function createNDCMapperWithSize(bounds, margin = 0.05) {
+    const { minX, maxX, minY, maxY } = bounds;
+    const width = maxX - minX;
+    const height = maxY - minY;
+
+    const scale = Math.max(width, height) || 1;
+    const offsetX = (scale - width) / 2;
+    const offsetY = (scale - height) / 2;
+
+    return function toNDCWithSize(x, y, size) {
+        const normX = (x - minX + offsetX) / scale;
+        const normY = (y - minY + offsetY) / scale;
+
+        // 缩放到 [margin, 1 - margin]，再线性映射到 [-1, 1]
+        const mappedX = (normX * (1 - 2 * margin) + margin) * 2 - 1;
+        const mappedY = -((normY * (1 - 2 * margin) + margin) * 2 - 1);
+
+        const s = size / scale * 2 * (1 - 2 * margin);
+        return [mappedX, mappedY, s, s];
+    };
+}
+
+function createNDCMapper(bounds, margin = 0.05) {
+    const { minX, maxX, minY, maxY } = bounds;
+    const width = maxX - minX;
+    const height = maxY - minY;
+
+    const scale = Math.max(width, height) || 1;
+    const offsetX = (scale - width) / 2;
+    const offsetY = (scale - height) / 2;
+
+    return function toNDC(x, y) {
+        const normX = (x - minX + offsetX) / scale;
+        const normY = (y - minY + offsetY) / scale;
+
+        const mappedX = (normX * (1 - 2 * margin) + margin) * 2 - 1;
+        const mappedY = -((normY * (1 - 2 * margin) + margin) * 2 - 1);
+        return [mappedX, mappedY];
+    };
+}
+
+function getEquivalentNDCMatrix(bounds, margin = 0.05) {
+    const { minX, maxX, minY, maxY } = bounds;
+    const width = maxX - minX;
+    const height = maxY - minY;
+
+    const scale = Math.max(width, height) || 1;
+    const offsetX = (scale - width) / 2;
+    const offsetY = (scale - height) / 2;
+
+    const a = (1 - 2 * margin) * 2 / scale;
+    const bx = ((-minX + offsetX) / scale) * (1 - 2 * margin) + margin;
+    const cx = bx * 2 - 1;
+
+    const by = ((-minY + offsetY) / scale) * (1 - 2 * margin) + margin;
+    const cy = -(by * 2 - 1);
+
+    return [
+        a, 0, 0,
+        0, -a, 0,
+        cx, cy, 1
+    ]; // mat3 是列主序，可直接转 mat4 传 shader
+}
+
+function getGraphBounds(nodes) {
+    let minX = Infinity, minY = Infinity;
+    let maxX = -Infinity, maxY = -Infinity;
+
+    nodes.forEach(node => {
+        if (node.x < minX) minX = node.x;
+        if (node.x > maxX) maxX = node.x;
+        if (node.y < minY) minY = node.y;
+        if (node.y > maxY) maxY = node.y;
+    });
+
+    return { minX, minY, maxX, maxY };
+}
+
+function getViewRectInWorldSpace(viewMatrix) {
+    const inv = mat3.create();
+    if (!mat3.invert(inv, viewMatrix)) return null;
+
+    const cornersNDC = [
+        [-1, -1], [1, -1], [1, 1], [-1, 1]
+    ];
+    let minX = Infinity, minY = Infinity;
+    let maxX = -Infinity, maxY = -Infinity;
+
+    for (let [nx, ny] of cornersNDC) {
+        const wx = inv[0] * nx + inv[3] * ny + inv[6];
+        const wy = inv[1] * nx + inv[4] * ny + inv[7];
+        minX = Math.min(minX, wx);
+        minY = Math.min(minY, wy);
+        maxX = Math.max(maxX, wx);
+        maxY = Math.max(maxY, wy);
+    }
+    return { minX, minY, maxX, maxY };
+}
+
+function getViewRect(canvas, viewMatrix) {
+
+    const topLeftWorld = canvasToWorld(0, 0, canvas.width, canvas.height, viewMatrix);
+    const bottomRightWorld = canvasToWorld(canvas.width, canvas.height, canvas.width, canvas.height, viewMatrix);
+    function NdcToPixel([x, y]) {
+        return [
+            x * canvas.width / 2 + canvas.width / 2,
+            y * -canvas.height / 2 + canvas.height / 2
+        ]
+    }
+    const [topLeftPixel_x, topLeftPixel_y] = NdcToPixel(topLeftWorld)
+    const [bottomRightpixel_x, bottomRightpixel_y] = NdcToPixel(bottomRightWorld)
+    const x = (topLeftPixel_x + bottomRightpixel_x) / 2
+    const y = (topLeftPixel_y + bottomRightpixel_y) / 2
+    const w = bottomRightpixel_x - topLeftPixel_x
+    const h = topLeftPixel_y - bottomRightpixel_y
+    const color = STYLE.viewRectColor// 半透明蓝色
+    const pickColor = [0.0, 0.0, 0.0, 0.0];
+    const selected = 0;
+    return new Float32Array([
+        x, y, w, h,
+        ...color,
+        ...pickColor,
+        selected
+    ]);
+}
+
+function getMiniMapViewMatrix(bounds, paddingRatio = 0.1) {
+    const { minX, maxX, minY, maxY } = bounds;
+    const w = maxX - minX;
+    const h = maxY - minY;
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const scale = 2 / Math.max(w * (1 + paddingRatio * 2), h * (1 + paddingRatio * 2));
+
+    const m = mat3.create();
+    mat3.translate(m, m, [-cx, -cy]);       // ✅ 先平移到中心
+    mat3.scale(m, m, [scale, scale]);       // ✅ 再整体缩放到 NDC 范围,顺序和主变换矩阵不同
+    return m;
+}
+
+
+function applyViewMatrix(x, y, mat) {
+    return [
+        mat[0] * x + mat[3] * y + mat[6],
+        mat[1] * x + mat[4] * y + mat[7]
+    ];
+}
+
+function canvasToWorld(x_px, y_px, canvasWidth, canvasHeight, viewMatrix) {
+    const x_ndc = (x_px / canvasWidth) * 2 - 1;
+    const y_ndc = 1 - (y_px / canvasHeight) * 2;
+
+    const ndc = vec2.fromValues(x_ndc, y_ndc);
+
+    const invViewMatrix = mat3.create();
+    mat3.invert(invViewMatrix, viewMatrix);
+
+    const world = vec2.create();
+    vec2.transformMat3(world, ndc, invViewMatrix);
+
+    return world;
+}

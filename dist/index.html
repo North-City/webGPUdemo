@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8,33 +9,51 @@
     body {
       margin: 0;
     }
-    #container, #webgpuCanvas {
-      border: 1px solid #ccc; /* 可选，方便看到边框 */
+
+    #container,
+    #webgpuCanvas,
+    #minimapCanvas {
+      border: 1px solid #ccc;
+      /* 可选，方便看到边框 */
     }
+
     .views {
       display: flex;
-      flex-direction: row; /* 横排 */
-      align-items: flex-start; /* 顶对齐 */
-      gap: 10px; /* 元素之间间距 */
+      flex-direction: row;
+      /* 横排 */
+      align-items: flex-start;
+      /* 顶对齐 */
+      gap: 10px;
+      /* 元素之间间距 */
       padding: 10px;
     }
   </style>
 <script defer src="bundle.js"></script></head>
+
 <body>
-  
+
   <div class="views">
-  <div class="panel">
-    <div class="panel-title">G6 实现</div>
-    <div id="container"></div>
-  </div>
+    <div class="panel">
+      <div class="panel-title">G6 实现</div>
+      <div id="container"></div>
+    </div>
 
-  <div class="panel">
-    <div class="panel-title">WebGPU 实现</div>
-    <canvas id="webgpuCanvas" width="1000" height="1000"></canvas>
-  </div>
+    <div class="panel">
+      <div class="panel-title">WebGPU 实现</div>
+      <canvas id="webgpuCanvas" width="1000" height="1000"></canvas>
+    </div>
+        
 
-</div>
-  <p class="note">*node数 5802 个，edge 数 9005。WebGPU 使用 G6 graph 布局后的位置数据</p>
-  <button id="downloadBtn">导出数据</button>
+  </div>
+  <div class="views"> 
+    <div class="panel">
+      <div class="panel-title"></div>
+      <canvas id="minimapCanvas" width="300" height="300"></canvas>
+    </div>
+  </div>
+ 
+  <!-- <p class="note">*node数 5802 个，edge 数 9005。WebGPU 使用 G6 graph 布局后的位置数据</p> -->
+  <!-- <button id="downloadBtn">导出数据</button> -->
 </body>
+
 </html>

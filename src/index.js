@@ -69,9 +69,6 @@ function generateEdges(data) {
 }
 let cardID = mergeAndDeduplicate(dat)
 let eList = generateEdges(dat)
-console.log("1", cardID);
-
-console.log(eList);
 
 
 let data
@@ -212,7 +209,6 @@ let dataForGPU = {
 console.log("dataForGPU", dataForGPU);
 
 initWebGPU(dataForGPU);
-
 
 
 
