@@ -658,8 +658,10 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
 
     canvas.addEventListener("click", async e => {
         const rect = canvas.getBoundingClientRect();
-        const px = Math.floor((e.clientX - rect.left) * devicePixelRatio);
-        const py = Math.floor((e.clientY - rect.top) * devicePixelRatio);
+        const px = Math.floor((e.clientX - rect.left));//不要乘以 * devicePixelRatio
+        const py = Math.floor((e.clientY - rect.top));
+        console.log("pxpy", px,py);
+        
         updateMatrix()
         // 执行 pick 渲染
         await renderPick(device, bindGroup, shaderModule, ringInstanceBuffer, quadBuffer, pickTexture, pipelineLayout, data);
