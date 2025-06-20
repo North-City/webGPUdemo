@@ -660,8 +660,8 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         const rect = canvas.getBoundingClientRect();
         const px = Math.floor((e.clientX - rect.left));//不要乘以 * devicePixelRatio
         const py = Math.floor((e.clientY - rect.top));
-        console.log("pxpy", px,py);
-        
+        console.log("pxpy", px, py);
+
         updateMatrix()
         // 执行 pick 渲染
         await renderPick(device, bindGroup, shaderModule, ringInstanceBuffer, quadBuffer, pickTexture, pipelineLayout, data);
@@ -1196,13 +1196,33 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
     });
 
     graph.edges.forEach(edge => {
-        const [x1, y1] = scale(edge.startPoint.x, edge.startPoint.y);
-        const [x2, y2] = scale(edge.endPoint.x, edge.endPoint.y);
-        polylines.push(x1, y1, x2, y2);
-        arrows.push(x1, y1, x2, y2);
-        // const [x1_mini, y1_mini] = toNDC(edge.startPoint.x, edge.startPoint.y);
-        // const [x2_mini, y2_mini] = toNDC(edge.endPoint.x, edge.endPoint.y);
-        polylines_mini.push(edge.startPoint.x, edge.startPoint.y, edge.endPoint.x, edge.endPoint.y);
+        if (edge.source == edge.target) {
+            const direction = edge.loopCfg.position;
+            const loopoffsetX = edge.loopCfg.dist / 4
+            const loopoffsetY = edge.loopCfg.dist / 2
+            // const [loopCenterX,loopCenterY] = [(edge.startPoint.x + edge.endPoint.x)/2, (edge.startPoint.y + edge.endPoint.y)/2] 
+            const [sourceX, sourceY] = scale(edge.startPoint.x, edge.startPoint.y)
+            const [mid1_X, mid1_Y] = scale(edge.startPoint.x - loopoffsetX, edge.startPoint.y - loopoffsetY)
+            const [mid2_X, mid2_Y] = scale(edge.endPoint.x + loopoffsetX, edge.endPoint.y - loopoffsetY)
+            const [targetX, targetY] = scale(edge.endPoint.x, edge.endPoint.y)
+
+            polylines.push(sourceX, sourceY, mid1_X, mid1_Y);
+            polylines_mini.push(edge.startPoint.x, edge.startPoint.y, edge.startPoint.x - loopoffsetX, edge.startPoint.y - loopoffsetY);
+            polylines.push(mid1_X, mid1_Y, mid2_X, mid2_Y);
+            polylines_mini.push(edge.startPoint.x - loopoffsetX, edge.startPoint.y - loopoffsetY, edge.endPoint.x + loopoffsetX, edge.endPoint.y - loopoffsetY);
+            polylines.push(mid2_X, mid2_Y, targetX, targetY);
+            polylines_mini.push(edge.endPoint.x + loopoffsetX, edge.endPoint.y - loopoffsetY, edge.endPoint.x, edge.endPoint.y);
+            arrows.push(mid2_X, mid2_Y, targetX, targetY);
+        } else {
+            const [x1, y1] = scale(edge.startPoint.x, edge.startPoint.y);
+            const [x2, y2] = scale(edge.endPoint.x, edge.endPoint.y);
+            polylines.push(x1, y1, x2, y2);
+            arrows.push(x1, y1, x2, y2);
+            // const [x1_mini, y1_mini] = toNDC(edge.startPoint.x, edge.startPoint.y);
+            // const [x2_mini, y2_mini] = toNDC(edge.endPoint.x, edge.endPoint.y);
+            polylines_mini.push(edge.startPoint.x, edge.startPoint.y, edge.endPoint.x, edge.endPoint.y);
+        }
+
     });
 
     return {
