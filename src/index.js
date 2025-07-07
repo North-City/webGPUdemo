@@ -72,7 +72,7 @@ let eList = generateEdges(dat)
 
 
 let data
-const show = "JA2"
+const show = "JA1"
 switch (show) {
   case "large":
     data = {
@@ -167,7 +167,7 @@ const graph = new G6.Graph({
   renderer: () => new SVGRenderer(),
   layout: {
     type: 'dagre',
-    rankdir: 'LR',
+    rankdir: 'TB',
     align: 'DL',
     nodesepFunc: () => {
       return 1;
