@@ -1,5 +1,4 @@
 import { mat3, vec2 } from 'gl-matrix';
-import { node } from 'webpack';
 // === 全局样式配置 ===
 const sampleCount = 4; // 开启 4 倍 MSAA
 let msaaTexture = null; //  提前声明全局变量
@@ -27,7 +26,10 @@ const STYLE = {
     ringInnerColor: [0.6, 0.2, 0.8, 0.0],
     ringHighlightColor: [0.6, 0.6, 0.6, 0.9],
 
-    viewRectColor: [0.0, 0.0, 1.0, 0.1]
+    viewRectColor: [0.0, 0.0, 1.0, 0.1],
+
+    nodeBound: null,
+    minimapMargin: 0.05
 };
 let signal = {
     mouseDownID: 0,
@@ -99,7 +101,7 @@ export async function initWebGPU(graph) {
     });
 
     const bounds = getGraphBounds(graph.nodes);  // 获取坐标范围
-    const miniMapViewMatrix = getEquivalentNDCMatrix(bounds);
+    const miniMapViewMatrix = getEquivalentNDCMatrix(bounds, STYLE.minimapMargin);
 
     const miniMapUniformBuffer = device.createBuffer({
         size: 80,
@@ -187,14 +189,15 @@ export async function initWebGPU(graph) {
 
       struct SimpleIn {
         @location(0) pos: vec2<f32>,
-        @location(1) sourceColor: vec3<f32>, // 起点颜色
-        @location(2) targetColor: vec3<f32>  // 终点颜色
+  @location(1) idColor: vec4<f32>
       };
 
       struct ArrowIn {
         @location(0) pos: vec2<f32>,
         @location(1) p1: vec2<f32>,
         @location(2) p2: vec2<f32>,
+        @location(3) sourceColorId: vec4<f32>,
+        @location(4) targetColorId: vec4<f32>
       };
 
       struct CharIn {
@@ -471,13 +474,13 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
     const quadBuffer = createBuffer(device, quad, GPUBufferUsage.VERTEX);
 
     const rectBuffer = createBuffer(device, data.rects, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,);
-    const lineBuffer = createBuffer(device, data.polylines, GPUBufferUsage.VERTEX);
+    const lineBuffer = createBuffer(device, data.polylines, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST);
     const arrowVertexBuffer = createBuffer(device, new Float32Array([
         0.0, 0.0,
         -STYLE.arrowSize, STYLE.arrowSize * 0.4,
         -STYLE.arrowSize, -STYLE.arrowSize * 0.4
     ]), GPUBufferUsage.VERTEX);
-    const arrowInstanceBuffer = createBuffer(device, data.arrowSegments, GPUBufferUsage.VERTEX);
+    const arrowInstanceBuffer = createBuffer(device, data.arrowSegments, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST);
     const charQuadBuffer = createBuffer(device, new Float32Array([
         -0.5, -0.5, 0.5, -0.5,
         -0.5, 0.5, 0.5, 0.5
@@ -489,7 +492,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
     console.log("charInstanceBuffer size:", expectedBytes);
 
     const rectBuffer_mini = createBuffer(device, data.rects_mini, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,);
-    const lineBuffer_mini = createBuffer(device, data.polylines_mini, GPUBufferUsage.VERTEX);
+    const lineBuffer_mini = createBuffer(device, data.polylines_mini, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST);
 
 
 
@@ -515,15 +518,24 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
     ], "triangle-strip", sampleCount);
 
     const linePipeline = createPipeline(device, shaderModule, pipelineLayout, format, "simple_vertex", "fragment_main", [
-        { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] }
+        {
+            arrayStride: 24, // 6 float × 4 bytes = 32
+            stepMode: "vertex",
+            attributes: [
+                { shaderLocation: 0, format: "float32x2", offset: 0 },   // position
+                { shaderLocation: 1, format: "float32x4", offset: 8 }    // colorID
+            ]
+        }
     ], "line-list", sampleCount);
 
     const arrowPipeline = createPipeline(device, shaderModule, pipelineLayout, format, "arrow_vertex", "fragment_main", [
         { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
         {
-            arrayStride: 16, stepMode: "instance", attributes: [
+            arrayStride: 48, stepMode: "instance", attributes: [
                 { shaderLocation: 1, format: "float32x2", offset: 0 },
-                { shaderLocation: 2, format: "float32x2", offset: 8 }
+                { shaderLocation: 2, format: "float32x2", offset: 8 },
+                { shaderLocation: 3, format: "float32x4", offset: 16 },
+                { shaderLocation: 4, format: "float32x4", offset: 32 }
             ]
         }
     ], "triangle-list", sampleCount);
@@ -595,7 +607,14 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         1  // ✅ 使用 sampleCount: 1
     );
     const miniMapLinePipeline = createPipeline(device, shaderModule, pipelineLayout, format, "simple_vertex", "fragment_mini", [
-        { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] }
+        {
+            arrayStride: 24, // 6 float × 4 bytes = 32
+            stepMode: "vertex",
+            attributes: [
+                { shaderLocation: 0, format: "float32x2", offset: 0 },   // position
+                { shaderLocation: 1, format: "float32x4", offset: 8 }    // colorID
+            ]
+        }
     ], "line-list", 1);
 
     // === 控制视图变换
@@ -759,15 +778,32 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         //  signal.mouseDownID = 0;
     });
     canvas.addEventListener("mousemove", e => {
+console.log("moveid",signal.mouseDownID);
         if (signal.mouseDownID !== 0) {
             const rect = canvas.getBoundingClientRect();
 
-            const prevX = (last[0] - rect.left) / canvas.width * 2 - 1;
-            const prevY = 1 - (last[1] - rect.top) / canvas.height * 2;
+            const prevX_canvas = (last[0] - rect.left)
+            const prevY_canvas = (last[1] - rect.top);
 
-            const currX = (e.clientX - rect.left) / canvas.width * 2 - 1;
-            const currY = 1 - (e.clientY - rect.top) / canvas.height * 2;
+            const currX_canvas = (e.clientX - rect.left)
+            const currY_canvas = (e.clientY - rect.top)
 
+            const prevX = prevX_canvas / canvas.width * 2 - 1;
+            const prevY = 1 - prevY_canvas / canvas.height * 2;
+
+            const currX = currX_canvas / canvas.width * 2 - 1;
+            const currY = 1 - currY_canvas / canvas.height * 2;
+
+            const boundWidth = STYLE.nodeBound.maxX - STYLE.nodeBound.minX;
+            const boundHeight = STYLE.nodeBound.maxY - STYLE.nodeBound.minY;
+
+            const scaleToMinimap = Math.max(boundWidth, boundHeight) || 1;
+            const miniMoveScale = (1 - 2 * STYLE.minimapMargin) * 2 / scaleToMinimap;
+
+            const [shiftX_canvas, shiftY_canvas] = [currX_canvas - prevX_canvas, currY_canvas - prevY_canvas];
+
+            markMoveById(signal.mouseDownID, data.rects_mini, 13, -1, [shiftX_canvas, shiftY_canvas]);
+            device.queue.writeBuffer(rectBuffer_mini, 0, data.rects_mini.buffer);
             const inv = mat3.create();
             if (mat3.invert(inv, viewMatrix)) {
                 const prevWorldX = inv[0] * prevX + inv[3] * prevY + inv[6];
@@ -787,6 +823,14 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
 
                 markMoveById(signal.mouseDownID, data.charData, 11, -1, [shiftX, shiftY]);
                 device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
+
+                arrowMoveById(signal.mouseDownID, data.arrowSegments, 12, -1, [shiftX, shiftY]);
+                device.queue.writeBuffer(arrowInstanceBuffer, 0, data.arrowSegments.buffer);
+
+                edgeMoveById(signal.mouseDownID, data.polylines, 12, -1, [shiftX, shiftY]);
+                device.queue.writeBuffer(lineBuffer, 0, data.polylines.buffer);
+
+
             }
 
             last = [e.clientX, e.clientY];
@@ -870,7 +914,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
 
         pass.setPipeline(linePipeline);
         pass.setVertexBuffer(0, lineBuffer);
-        pass.draw(data.polylines.length / 10);
+        pass.draw(data.polylines.length / 6);
 
         pass.setPipeline(rectPipeline);
         pass.setVertexBuffer(0, quadBuffer);
@@ -885,7 +929,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         pass.setPipeline(arrowPipeline);
         pass.setVertexBuffer(0, arrowVertexBuffer);
         pass.setVertexBuffer(1, arrowInstanceBuffer);
-        pass.draw(3, data.arrowSegments.length / 4);
+        pass.draw(3, data.arrowSegments.length / 12);
 
         pass.setPipeline(charPipeline);
         pass.setVertexBuffer(0, charQuadBuffer);
@@ -916,7 +960,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         // 边
         miniMapPass.setPipeline(miniMapLinePipeline);
         miniMapPass.setVertexBuffer(0, lineBuffer_mini);
-        miniMapPass.draw(data.polylines_mini.length / 10);
+        miniMapPass.draw(data.polylines_mini.length / 6);
 
         // 节点矩形
         miniMapPass.setPipeline(miniMapRectPipeline);
@@ -1205,18 +1249,11 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
 
     // const toNDCWithSize = createNDCMapperWithSize(bounds);
     // const toNDC = createNDCMapper(bounds);
-
+    STYLE.nodeBound = getGraphBounds(graph.nodes);
+    let nodeColorIdMap = new Map();
     graph.nodes.forEach((node, index) => {
         const nodeID = encodeIdToColor(index + 1); console.log(nodeID);
-        graph.edges.forEach(edge => {
-            //寻找从当前节点出或入的边并把编码ID添加到边的对应属性中
-            if (edge.source === node.id) {
-                edge.sourceColorId = nodeID;
-            }
-            if (edge.target === node.id) {
-                edge.targetColorId = nodeID;
-            }
-        })
+        nodeColorIdMap.set(node.id, nodeID);
         const selected = 0;
         const [x, y] = scale(node.x, node.y);
         const w = node.size / canvas.width * 2;//for JinAn data
@@ -1251,6 +1288,8 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
     });
 
     graph.edges.forEach(edge => {
+        edge.sourceColorId = nodeColorIdMap.get(edge.source) || encodeIdToColor(0);
+        edge.targetColorId = nodeColorIdMap.get(edge.target) || encodeIdToColor(0);
         if (edge.source == edge.target) {
             const direction = edge.loopCfg.position;
             const loopoffsetX = edge.loopCfg.dist / 4
@@ -1261,25 +1300,25 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
             const [mid2_X, mid2_Y] = scale(edge.endPoint.x + loopoffsetX, edge.endPoint.y - loopoffsetY)
             const [targetX, targetY] = scale(edge.endPoint.x, edge.endPoint.y)
 
-            polylines.push(sourceX, sourceY, mid1_X, mid1_Y, ...edge.sourceColorId, ...edge.targetColorId);
-            polylines_mini.push(edge.startPoint.x, edge.startPoint.y, edge.startPoint.x - loopoffsetX, edge.startPoint.y - loopoffsetY, ...edge.sourceColorId, ...edge.targetColorId);
-            polylines.push(mid1_X, mid1_Y, mid2_X, mid2_Y, ...edge.sourceColorId, ...edge.targetColorId);
-            polylines_mini.push(edge.startPoint.x - loopoffsetX, edge.startPoint.y - loopoffsetY, edge.endPoint.x + loopoffsetX, edge.endPoint.y - loopoffsetY, ...edge.sourceColorId, ...edge.targetColorId);
-            polylines.push(mid2_X, mid2_Y, targetX, targetY, ...edge.sourceColorId, ...edge.targetColorId);
-            polylines_mini.push(edge.endPoint.x + loopoffsetX, edge.endPoint.y - loopoffsetY, edge.endPoint.x, edge.endPoint.y, ...edge.sourceColorId, ...edge.targetColorId);
+            polylines.push(sourceX, sourceY, ...edge.sourceColorId, mid1_X, mid1_Y, ...edge.targetColorId);
+            polylines_mini.push(edge.startPoint.x, edge.startPoint.y, ...edge.sourceColorId, edge.startPoint.x - loopoffsetX, edge.startPoint.y - loopoffsetY, ...edge.targetColorId);
+            polylines.push(mid1_X, mid1_Y, ...edge.sourceColorId, mid2_X, mid2_Y, ...edge.targetColorId);
+            polylines_mini.push(edge.startPoint.x - loopoffsetX, edge.startPoint.y - loopoffsetY, ...edge.sourceColorId, edge.endPoint.x + loopoffsetX, edge.endPoint.y - loopoffsetY, ...edge.targetColorId);
+            polylines.push(mid2_X, mid2_Y, ...edge.sourceColorId, targetX, targetY, ...edge.targetColorId);
+            polylines_mini.push(edge.endPoint.x + loopoffsetX, edge.endPoint.y - loopoffsetY, ...edge.sourceColorId, edge.endPoint.x, edge.endPoint.y, ...edge.targetColorId);
             arrows.push(mid2_X, mid2_Y, targetX, targetY, ...edge.sourceColorId, ...edge.targetColorId);
         } else {
             const [x1, y1] = scale(edge.startPoint.x, edge.startPoint.y);
             const [x2, y2] = scale(edge.endPoint.x, edge.endPoint.y);
-            polylines.push(x1, y1, x2, y2, ...edge.sourceColorId, ...edge.targetColorId);
+            polylines.push(x1, y1, ...edge.sourceColorId, x2, y2, ...edge.targetColorId);
             arrows.push(x1, y1, x2, y2, ...edge.sourceColorId, ...edge.targetColorId);
+            polylines_mini.push(edge.startPoint.x, edge.startPoint.y, ...edge.sourceColorId, edge.endPoint.x, edge.endPoint.y, ...edge.targetColorId);
             // const [x1_mini, y1_mini] = toNDC(edge.startPoint.x, edge.startPoint.y);
             // const [x2_mini, y2_mini] = toNDC(edge.endPoint.x, edge.endPoint.y);
-            polylines_mini.push(edge.startPoint.x, edge.startPoint.y, edge.endPoint.x, edge.endPoint.y, ...edge.sourceColorId, ...edge.targetColorId);
         }
 
     });
-
+    
     return {
         rects: new Float32Array(rects),
         polylines: new Float32Array(polylines),
@@ -1365,12 +1404,11 @@ async function renderPick(device, bindGroup, shaderModule, ringInstanceBuffer, q
 
 //最后四位是颜色编码的ID
 function markSelectedById(id, arr, stride, selectedOffset, select = true) {
-    for (let i = 1; i * stride < arr.length; i++) {
+    for (let i = 1; i * stride <= arr.length; i++) {
         let [r, g, b] = [arr[i * stride + selectedOffset - 4], arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2]]
         if (decodeColorToIdFloat(r, g, b) === id) {
             if (select) {
                 arr[i * stride + selectedOffset] = 1
-                console.log(id, i * stride + selectedOffset);
 
             } else {
                 arr[i * stride + selectedOffset] = 0
@@ -1381,26 +1419,50 @@ function markSelectedById(id, arr, stride, selectedOffset, select = true) {
 }
 
 //第一、二位是位置
-function markMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY], nodeItem = true) {
-    if (nodeItem) {
-        for (let i = 1; i * stride < arr.length; i++) {
-            let [r, g, b] = [arr[i * stride + selectedOffset - 4], arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2]]
-            if (decodeColorToIdFloat(r, g, b) === id) {
-                // console.log(i, i * stride, arr[(i - 1) * stride],arr[(i - 1) * stride+1]);
-                arr[(i - 1) * stride] += shiftX
-                arr[(i - 1) * stride + 1] += shiftY
-                // debugger
-            }
+function markMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY]) {
+    for (let i = 1; i * stride <= arr.length; i++) {
+        let [r, g, b] = [arr[i * stride + selectedOffset - 4], arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2]]
+        if (decodeColorToIdFloat(r, g, b) === id) {
+            arr[(i - 1) * stride] += shiftX
+            arr[(i - 1) * stride + 1] += shiftY
         }
-    } else {
-        for (let i = 1; i * stride < arr.length; i++) {
-            let [r, g, b] = [arr[i * stride + selectedOffset - 4], arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2]]
-            if (decodeColorToIdFloat(r, g, b) === id) {
-                // console.log(i, i * stride, arr[(i - 1) * stride],arr[(i - 1) * stride+1]);
-                arr[i * stride] += shiftX
-                arr[i * stride + 1] += shiftY
-                // debugger
-            }
+    }
+}
+
+function arrowMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY]) {
+    for (let i = 1; i * stride <= arr.length; i++) {
+        let [rSource, gSource, bSource] = [arr[i * stride + selectedOffset - 7], arr[i * stride + selectedOffset - 6], arr[i * stride + selectedOffset - 5]]
+        let [rTarget, gTarget, bTarget] = [arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2], arr[i * stride + selectedOffset - 1]]
+        const sourceId = decodeColorToIdFloat(rSource, gSource, bSource);
+        const targetId = decodeColorToIdFloat(rTarget, gTarget, bTarget);
+        console.log("sourceId", [rSource, gSource, bSource], "targetId", [rTarget, gTarget, bTarget], "id", id);
+
+        if (sourceId === id) {
+            arr[(i - 1) * stride] += shiftX
+            arr[(i - 1) * stride + 1] += shiftY
+        }
+        if (targetId === id) {
+            arr[(i - 1) * stride + 2] += shiftX
+            arr[(i - 1) * stride + 3] += shiftY
+        }
+    }
+}
+
+function edgeMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY]) {
+    for (let i = 1; i * stride <= arr.length; i++) {
+        let [rSource, gSource, bSource] = [arr[i * stride + selectedOffset - 9], arr[i * stride + selectedOffset - 8], arr[i * stride + selectedOffset - 7]]
+        let [rTarget, gTarget, bTarget] = [arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2], arr[i * stride + selectedOffset - 1]]
+        const sourceId = decodeColorToIdFloat(rSource, gSource, bSource);
+        const targetId = decodeColorToIdFloat(rTarget, gTarget, bTarget);
+        console.log("sourceId",sourceId, [rSource, gSource, bSource], "targetId",targetId, [rTarget, gTarget, bTarget], "id", id);
+
+        if (sourceId === id) {
+            arr[(i - 1) * stride] += shiftX
+            arr[(i - 1) * stride + 1] += shiftY
+        }
+        if (targetId === id) {
+            arr[(i - 1) * stride + 6] += shiftX
+            arr[(i - 1) * stride + 7] += shiftY
         }
     }
 }
