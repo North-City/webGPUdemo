@@ -32,11 +32,23 @@ const STYLE = {
     minimapMargin: 0.05
 };
 let signal = {
-    mouseDownID: 0,
+    mouseDownIdFlag: false,
+    mouseDownID: [0, 0, 0],
+    nodeMoveFlag: false,
+    canvasMoveFlag: false,
 }
 let undoStack = []
 let redoStack = []
-
+let DataManager = {
+    nodeColorIdMap: new Map(), // 节点颜色ID映射
+    edgeColorIdMap: new Map(), // 边颜色ID映射
+    adjGraph: new Map(), // 邻接图
+    adjGraph_arrow: new Map(), // 邻接图, 用于存储箭头
+}
+const commandDict = {
+    CLICK: 1,
+    DRAG: 2,
+}
 
 export async function initWebGPU(graph) {
     if (!navigator.gpu) {
@@ -89,7 +101,7 @@ export async function initWebGPU(graph) {
 
 
 
-    const data = extractDataFromG6(graph, canvas, uvMap, imageUVMap);
+    let data = extractDataFromG6(graph, canvas, uvMap, imageUVMap);
 
     //↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑图元需要的额外资源
 
@@ -682,11 +694,21 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
     });
 
     canvas.addEventListener("click", async e => {
+        console.log("click1");
 
-        if (signal.mouseDownID === 0) { console.log(13131); return }
+        // if (signal.mouseDownIdFlag) { console.log(13131); return }
+        if (signal.nodeMoveFlag || signal.canvasMoveFlag) {
+            signal.nodeMoveFlag = false;
+            signal.canvasMoveFlag = false;
+            return
+        }
         const select = true
-        undoStack.push(signal.mouseDownID);
+        undoStack.push({
+            type: commandDict.CLICK,
+            config: signal.mouseDownID
+        });
         redoStack = [];
+
         markSelectedById(signal.mouseDownID, data.rects, 13, -1, select);
         device.queue.writeBuffer(rectBuffer, 0, data.rects.buffer);
 
@@ -699,46 +721,89 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         markSelectedById(signal.mouseDownID, data.charData, 11, -1, select);
         device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
 
-        signal.mouseDownID = 0; // 重置鼠标点击 ID
+        signal.mouseDownIdFlag = false; // 重置鼠标点击 ID
+
+        console.log("click2");
     });
 
 
     window.addEventListener("keydown", e => {
+
         if (e.ctrlKey && e.key === 'z') {
             if (!undoStack.length) return
-            let id = undoStack.pop()
-            redoStack.push(id)
-            const select = false
-            markSelectedById(id, data.rects, 13, -1, select);
-            device.queue.writeBuffer(rectBuffer, 0, data.rects.buffer);
 
-            markSelectedById(id, data.ringInstances, 9, -1, select);
-            device.queue.writeBuffer(ringInstanceBuffer, 0, data.ringInstances.buffer);
+            const command = undoStack.pop()
+            redoStack.push(command)
+            console.log("stacks", undoStack, undoStack.length, redoStack, redoStack.length);
 
-            markSelectedById(id, data.imageInstances, 13, -1, select);
-            device.queue.writeBuffer(imageInstanceBuffer, 0, data.imageInstances.buffer);
+            if (command.type === commandDict.CLICK) {
+                let id = command.config
+                const select = false
+                markSelectedById(id, data.rects, 13, -1, select);
+                device.queue.writeBuffer(rectBuffer, 0, data.rects.buffer);
 
-            markSelectedById(id, data.charData, 11, -1, select);
-            device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
+                markSelectedById(id, data.ringInstances, 9, -1, select);
+                device.queue.writeBuffer(ringInstanceBuffer, 0, data.ringInstances.buffer);
+
+                markSelectedById(id, data.imageInstances, 13, -1, select);
+                device.queue.writeBuffer(imageInstanceBuffer, 0, data.imageInstances.buffer);
+
+                markSelectedById(id, data.charData, 11, -1, select);
+                device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
+            } else if (command.type === commandDict.DRAG) {
+                console.log("undo drag");
+                const prevData = command.config.before;
+                data = prevData;
+                device.queue.writeBuffer(rectBuffer, 0, data.rects.buffer);
+                device.queue.writeBuffer(ringInstanceBuffer, 0, data.ringInstances.buffer);
+                device.queue.writeBuffer(imageInstanceBuffer, 0, data.imageInstances.buffer);
+                device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
+                device.queue.writeBuffer(rectBuffer_mini, 0, data.rects_mini.buffer);
+                device.queue.writeBuffer(lineBuffer_mini, 0, data.polylines_mini.buffer);
+                device.queue.writeBuffer(arrowInstanceBuffer, 0, data.arrowSegments.buffer);
+                device.queue.writeBuffer(lineBuffer, 0, data.polylines.buffer);
+            }
+
         } else if (e.ctrlKey && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) {
             if (!redoStack.length) return
-            let id = redoStack.pop()
-            undoStack.push(id)
-            const select = true
-            markSelectedById(id, data.rects, 13, -1, select);
-            device.queue.writeBuffer(rectBuffer, 0, data.rects.buffer);
+            console.log("ctrlY");
 
-            markSelectedById(id, data.ringInstances, 9, -1, select);
-            device.queue.writeBuffer(ringInstanceBuffer, 0, data.ringInstances.buffer);
+            const command = redoStack.pop()
+            undoStack.push(command)
+            console.log("stacks", undoStack, undoStack.length, redoStack, redoStack.length);
+            if (command.type === commandDict.CLICK) {
+                let id = command.config
+                const select = true
+                markSelectedById(id, data.rects, 13, -1, select);
+                device.queue.writeBuffer(rectBuffer, 0, data.rects.buffer);
 
-            markSelectedById(id, data.imageInstances, 13, -1, select);
-            device.queue.writeBuffer(imageInstanceBuffer, 0, data.imageInstances.buffer);
+                markSelectedById(id, data.ringInstances, 9, -1, select);
+                device.queue.writeBuffer(ringInstanceBuffer, 0, data.ringInstances.buffer);
 
-            markSelectedById(id, data.charData, 11, -1, select);
-            device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
+                markSelectedById(id, data.imageInstances, 13, -1, select);
+                device.queue.writeBuffer(imageInstanceBuffer, 0, data.imageInstances.buffer);
+
+                markSelectedById(id, data.charData, 11, -1, select);
+                device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
+            } else if (command.type === commandDict.DRAG) {
+                console.log("redo drag");
+                const prevData = command.config.after;
+                data = prevData;
+                device.queue.writeBuffer(rectBuffer, 0, data.rects.buffer);
+                device.queue.writeBuffer(ringInstanceBuffer, 0, data.ringInstances.buffer);
+                device.queue.writeBuffer(imageInstanceBuffer, 0, data.imageInstances.buffer);
+                device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
+                device.queue.writeBuffer(rectBuffer_mini, 0, data.rects_mini.buffer);
+                device.queue.writeBuffer(lineBuffer_mini, 0, data.polylines_mini.buffer);
+                device.queue.writeBuffer(arrowInstanceBuffer, 0, data.arrowSegments.buffer);
+                device.queue.writeBuffer(lineBuffer, 0, data.polylines.buffer);
+            }
+
         }
     });
     canvas.addEventListener("mousedown", async e => {
+        console.log("down");
+
         dragging = true; last = [e.clientX, e.clientY];
         const rect = canvas.getBoundingClientRect();
         const px = Math.floor((e.clientX - rect.left));//不要乘以 * devicePixelRatio
@@ -771,15 +836,33 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
 
         const id = decodeColorToId(r, g, b);
         console.log("点击选中 ring ID:", r, g, b, id);
-        signal.mouseDownID = id;
+        signal.mouseDownID = [r / 255, g / 255, b / 255];
+        signal.mouseDownIdFlag = true;
+
+
     });
     canvas.addEventListener("mouseup", () => {
+        if (undoStack[undoStack.length - 1]?.type === commandDict.DRAG) {
+            undoStack[undoStack.length - 1].config.after = cloneData(data);
+        }
         dragging = false
+        signal.mouseDownIdFlag = false; // 重置鼠标点击 ID
         //  signal.mouseDownID = 0;
+        console.log("up");
+
     });
     canvas.addEventListener("mousemove", e => {
-console.log("moveid",signal.mouseDownID);
-        if (signal.mouseDownID !== 0) {
+        // console.log("moveid",signal.mouseDownID);
+        if (signal.mouseDownIdFlag && !matchColorID(signal.mouseDownID, [0, 0, 0])) {
+            if (!undoStack.length || undoStack[undoStack.length - 1]?.type !== commandDict.DRAG) {
+                undoStack.push({
+                    type: commandDict.DRAG,
+                    config: {
+                        before:cloneData(data)
+                    }
+                });
+            }
+            signal.nodeMoveFlag = true;
             const rect = canvas.getBoundingClientRect();
 
             const prevX_canvas = (last[0] - rect.left)
@@ -804,6 +887,9 @@ console.log("moveid",signal.mouseDownID);
 
             markMoveById(signal.mouseDownID, data.rects_mini, 13, -1, [shiftX_canvas, shiftY_canvas]);
             device.queue.writeBuffer(rectBuffer_mini, 0, data.rects_mini.buffer);
+            edgeMoveById(signal.mouseDownID, data.polylines_mini, 12, -1, [shiftX_canvas, shiftY_canvas]);
+            device.queue.writeBuffer(lineBuffer_mini, 0, data.polylines_mini.buffer);
+
             const inv = mat3.create();
             if (mat3.invert(inv, viewMatrix)) {
                 const prevWorldX = inv[0] * prevX + inv[3] * prevY + inv[6];
@@ -831,10 +917,13 @@ console.log("moveid",signal.mouseDownID);
                 device.queue.writeBuffer(lineBuffer, 0, data.polylines.buffer);
 
 
+
+
             }
 
             last = [e.clientX, e.clientY];
         }
+
         const rect = canvas.getBoundingClientRect();
         const x = (e.clientX - rect.left) / canvas.width * 2 - 1;
         const y = 1 - (e.clientY - rect.top) / canvas.height * 2;
@@ -852,6 +941,7 @@ console.log("moveid",signal.mouseDownID);
         }
         // 如果在拖动，也更新偏移
         if (dragging) {
+            signal.canvasMoveFlag = true;
             const rect = canvas.getBoundingClientRect();
 
             const prevX = (last[0] - rect.left) / canvas.width * 2 - 1;
@@ -1250,10 +1340,12 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
     // const toNDCWithSize = createNDCMapperWithSize(bounds);
     // const toNDC = createNDCMapper(bounds);
     STYLE.nodeBound = getGraphBounds(graph.nodes);
-    let nodeColorIdMap = new Map();
+    // let DataManager.nodeColorIdMap = new Map();
     graph.nodes.forEach((node, index) => {
         const nodeID = encodeIdToColor(index + 1); console.log(nodeID);
-        nodeColorIdMap.set(node.id, nodeID);
+        DataManager.nodeColorIdMap.set(node.id, nodeID);
+        DataManager.adjGraph.set([nodeID[0], nodeID[1], nodeID[2]].join(","), new Set())
+        DataManager.adjGraph_arrow.set([nodeID[0], nodeID[1], nodeID[2]].join(","), new Set())
         const selected = 0;
         const [x, y] = scale(node.x, node.y);
         const w = node.size / canvas.width * 2;//for JinAn data
@@ -1286,10 +1378,12 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
         const radius = w * 1.25;
         ringInstances.push(x, y, radius, strokeWidth, ...nodeID, selected)
     });
-
-    graph.edges.forEach(edge => {
-        edge.sourceColorId = nodeColorIdMap.get(edge.source) || encodeIdToColor(0);
-        edge.targetColorId = nodeColorIdMap.get(edge.target) || encodeIdToColor(0);
+    console.log(DataManager.adjGraph);
+    let edgeOffsetCount = 0;
+    let arrowOffsetCount = 0;
+    graph.edges.forEach((edge) => {
+        edge.sourceColorId = DataManager.nodeColorIdMap.get(edge.source) || encodeIdToColor(0);
+        edge.targetColorId = DataManager.nodeColorIdMap.get(edge.target) || encodeIdToColor(0);
         if (edge.source == edge.target) {
             const direction = edge.loopCfg.position;
             const loopoffsetX = edge.loopCfg.dist / 4
@@ -1302,23 +1396,37 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
 
             polylines.push(sourceX, sourceY, ...edge.sourceColorId, mid1_X, mid1_Y, ...edge.targetColorId);
             polylines_mini.push(edge.startPoint.x, edge.startPoint.y, ...edge.sourceColorId, edge.startPoint.x - loopoffsetX, edge.startPoint.y - loopoffsetY, ...edge.targetColorId);
+            DataManager.adjGraph.get([edge.sourceColorId[0], edge.sourceColorId[1], edge.sourceColorId[2]].join(",")).add(edgeOffsetCount);
+            DataManager.adjGraph.get([edge.targetColorId[0], edge.targetColorId[1], edge.targetColorId[2]].join(",")).add(edgeOffsetCount++);
+
             polylines.push(mid1_X, mid1_Y, ...edge.sourceColorId, mid2_X, mid2_Y, ...edge.targetColorId);
             polylines_mini.push(edge.startPoint.x - loopoffsetX, edge.startPoint.y - loopoffsetY, ...edge.sourceColorId, edge.endPoint.x + loopoffsetX, edge.endPoint.y - loopoffsetY, ...edge.targetColorId);
+            DataManager.adjGraph.get([edge.sourceColorId[0], edge.sourceColorId[1], edge.sourceColorId[2]].join(",")).add(edgeOffsetCount);
+            DataManager.adjGraph.get([edge.targetColorId[0], edge.targetColorId[1], edge.targetColorId[2]].join(",")).add(edgeOffsetCount++);
+
             polylines.push(mid2_X, mid2_Y, ...edge.sourceColorId, targetX, targetY, ...edge.targetColorId);
             polylines_mini.push(edge.endPoint.x + loopoffsetX, edge.endPoint.y - loopoffsetY, ...edge.sourceColorId, edge.endPoint.x, edge.endPoint.y, ...edge.targetColorId);
+            DataManager.adjGraph.get([edge.sourceColorId[0], edge.sourceColorId[1], edge.sourceColorId[2]].join(",")).add(edgeOffsetCount);
+            DataManager.adjGraph.get([edge.targetColorId[0], edge.targetColorId[1], edge.targetColorId[2]].join(",")).add(edgeOffsetCount++);
             arrows.push(mid2_X, mid2_Y, targetX, targetY, ...edge.sourceColorId, ...edge.targetColorId);
+            DataManager.adjGraph_arrow.get([edge.sourceColorId[0], edge.sourceColorId[1], edge.sourceColorId[2]].join(",")).add(arrowOffsetCount);
+            DataManager.adjGraph_arrow.get([edge.targetColorId[0], edge.targetColorId[1], edge.targetColorId[2]].join(",")).add(arrowOffsetCount++);
         } else {
             const [x1, y1] = scale(edge.startPoint.x, edge.startPoint.y);
             const [x2, y2] = scale(edge.endPoint.x, edge.endPoint.y);
             polylines.push(x1, y1, ...edge.sourceColorId, x2, y2, ...edge.targetColorId);
-            arrows.push(x1, y1, x2, y2, ...edge.sourceColorId, ...edge.targetColorId);
             polylines_mini.push(edge.startPoint.x, edge.startPoint.y, ...edge.sourceColorId, edge.endPoint.x, edge.endPoint.y, ...edge.targetColorId);
+            DataManager.adjGraph.get([edge.sourceColorId[0], edge.sourceColorId[1], edge.sourceColorId[2]].join(",")).add(edgeOffsetCount);
+            DataManager.adjGraph.get([edge.targetColorId[0], edge.targetColorId[1], edge.targetColorId[2]].join(",")).add(edgeOffsetCount++);
+
+            arrows.push(x1, y1, x2, y2, ...edge.sourceColorId, ...edge.targetColorId);
+            DataManager.adjGraph_arrow.get([edge.sourceColorId[0], edge.sourceColorId[1], edge.sourceColorId[2]].join(",")).add(arrowOffsetCount);
+            DataManager.adjGraph_arrow.get([edge.targetColorId[0], edge.targetColorId[1], edge.targetColorId[2]].join(",")).add(arrowOffsetCount++);
             // const [x1_mini, y1_mini] = toNDC(edge.startPoint.x, edge.startPoint.y);
             // const [x2_mini, y2_mini] = toNDC(edge.endPoint.x, edge.endPoint.y);
         }
 
     });
-    
     return {
         rects: new Float32Array(rects),
         polylines: new Float32Array(polylines),
@@ -1403,10 +1511,10 @@ async function renderPick(device, bindGroup, shaderModule, ringInstanceBuffer, q
 // }
 
 //最后四位是颜色编码的ID
-function markSelectedById(id, arr, stride, selectedOffset, select = true) {
+function markSelectedById(colorId, arr, stride, selectedOffset, select = true) {
     for (let i = 1; i * stride <= arr.length; i++) {
         let [r, g, b] = [arr[i * stride + selectedOffset - 4], arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2]]
-        if (decodeColorToIdFloat(r, g, b) === id) {
+        if (matchColorID([r, g, b], colorId)) {
             if (select) {
                 arr[i * stride + selectedOffset] = 1
 
@@ -1422,7 +1530,8 @@ function markSelectedById(id, arr, stride, selectedOffset, select = true) {
 function markMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY]) {
     for (let i = 1; i * stride <= arr.length; i++) {
         let [r, g, b] = [arr[i * stride + selectedOffset - 4], arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2]]
-        if (decodeColorToIdFloat(r, g, b) === id) {
+
+        if (matchColorID([r, g, b], id)) {
             arr[(i - 1) * stride] += shiftX
             arr[(i - 1) * stride + 1] += shiftY
         }
@@ -1430,43 +1539,75 @@ function markMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY]) {
 }
 
 function arrowMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY]) {
-    for (let i = 1; i * stride <= arr.length; i++) {
+    const strColorId = id.join(",");
+    const decodeColor = decodeColorToIdFloat(...id);
+    for (const value of DataManager.adjGraph_arrow.get(strColorId)) {
+        let i = value + 1; // +1 因为数据从 1 开始
+
         let [rSource, gSource, bSource] = [arr[i * stride + selectedOffset - 7], arr[i * stride + selectedOffset - 6], arr[i * stride + selectedOffset - 5]]
         let [rTarget, gTarget, bTarget] = [arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2], arr[i * stride + selectedOffset - 1]]
         const sourceId = decodeColorToIdFloat(rSource, gSource, bSource);
         const targetId = decodeColorToIdFloat(rTarget, gTarget, bTarget);
-        console.log("sourceId", [rSource, gSource, bSource], "targetId", [rTarget, gTarget, bTarget], "id", id);
 
-        if (sourceId === id) {
+        if (sourceId === decodeColor) {
             arr[(i - 1) * stride] += shiftX
             arr[(i - 1) * stride + 1] += shiftY
         }
-        if (targetId === id) {
+        if (targetId === decodeColor) {
             arr[(i - 1) * stride + 2] += shiftX
             arr[(i - 1) * stride + 3] += shiftY
         }
     }
+
 }
 
 function edgeMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY]) {
-    for (let i = 1; i * stride <= arr.length; i++) {
+    const strColorId = id.join(",");
+    const decodeColor = decodeColorToIdFloat(...id);
+    for (const value of DataManager.adjGraph.get(strColorId)) {
+        let i = value + 1; // +1 因为数据从 1 开始
+
         let [rSource, gSource, bSource] = [arr[i * stride + selectedOffset - 9], arr[i * stride + selectedOffset - 8], arr[i * stride + selectedOffset - 7]]
         let [rTarget, gTarget, bTarget] = [arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2], arr[i * stride + selectedOffset - 1]]
         const sourceId = decodeColorToIdFloat(rSource, gSource, bSource);
         const targetId = decodeColorToIdFloat(rTarget, gTarget, bTarget);
-        console.log("sourceId",sourceId, [rSource, gSource, bSource], "targetId",targetId, [rTarget, gTarget, bTarget], "id", id);
 
-        if (sourceId === id) {
+        if (sourceId === decodeColor) {
             arr[(i - 1) * stride] += shiftX
             arr[(i - 1) * stride + 1] += shiftY
         }
-        if (targetId === id) {
+        if (targetId === decodeColor) {
             arr[(i - 1) * stride + 6] += shiftX
             arr[(i - 1) * stride + 7] += shiftY
         }
     }
+
+
 }
 
+function mini_EdgeMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY]) {
+    const strColorId = id.join(",");
+    const decodeColor = decodeColorToIdFloat(...id);
+    for (const value of DataManager.adjGraph.get(strColorId)) {
+        let i = value + 1; // +1 因为数据从 1 开始
+
+        let [rSource, gSource, bSource] = [arr[i * stride + selectedOffset - 9], arr[i * stride + selectedOffset - 8], arr[i * stride + selectedOffset - 7]]
+        let [rTarget, gTarget, bTarget] = [arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2], arr[i * stride + selectedOffset - 1]]
+        const sourceId = decodeColorToIdFloat(rSource, gSource, bSource);
+        const targetId = decodeColorToIdFloat(rTarget, gTarget, bTarget);
+
+        if (sourceId === decodeColor) {
+            arr[(i - 1) * stride] += shiftX
+            arr[(i - 1) * stride + 1] += shiftY
+        }
+        if (targetId === decodeColor) {
+            arr[(i - 1) * stride + 6] += shiftX
+            arr[(i - 1) * stride + 7] += shiftY
+        }
+    }
+
+
+}
 
 function createNDCMapperWithSize(bounds, margin = 0.05) {
     const { minX, maxX, minY, maxY } = bounds;
@@ -1629,4 +1770,22 @@ function canvasToWorld(x_px, y_px, canvasWidth, canvasHeight, viewMatrix) {
     vec2.transformMat3(world, ndc, invViewMatrix);
 
     return world;
+}
+
+function matchColorID([r1, g1, b1], [r2, g2, b2]) {
+    return decodeColorToIdFloat(r1, g1, b1) === decodeColorToIdFloat(r2, g2, b2);
+}
+
+function cloneData(data) {
+    const cloned = {};
+    for (const key in data) {
+        if (Array.isArray(data[key])) {
+            cloned[key] = data[key].slice(); // 浅拷贝数组
+        } else if (data[key] instanceof Float32Array) {
+            cloned[key] = new Float32Array(data[key]); // 浅拷贝 Float32Array
+        } else {
+            cloned[key] = data[key]; // 其他类型直接赋值
+        }
+    }
+    return cloned;
 }
