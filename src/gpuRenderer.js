@@ -36,6 +36,7 @@ let signal = {
     mouseDownID: [0, 0, 0],
     nodeMoveFlag: false,
     canvasMoveFlag: false,
+    dragging: false,
 }
 let undoStack = []
 let redoStack = []
@@ -44,6 +45,7 @@ let DataManager = {
     edgeColorIdMap: new Map(), // 边颜色ID映射
     adjGraph: new Map(), // 邻接图
     adjGraph_arrow: new Map(), // 邻接图, 用于存储箭头
+    miniMapViewMatrix: null,
 }
 const commandDict = {
     CLICK: 1,
@@ -113,7 +115,7 @@ export async function initWebGPU(graph) {
     });
 
     const bounds = getGraphBounds(graph.nodes);  // 获取坐标范围
-    const miniMapViewMatrix = getEquivalentNDCMatrix(bounds, STYLE.minimapMargin);
+    DataManager.miniMapViewMatrix = getEquivalentNDCMatrix(bounds, STYLE.minimapMargin);
 
     const miniMapUniformBuffer = device.createBuffer({
         size: 80,
@@ -652,10 +654,10 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
     };
     const updateMiniMapMatrix = () => {
         const mat4 = new Float32Array([
-            miniMapViewMatrix[0], miniMapViewMatrix[1], 0, 0,
-            miniMapViewMatrix[3], miniMapViewMatrix[4], 0, 0,
+            DataManager.miniMapViewMatrix[0], DataManager.miniMapViewMatrix[1], 0, 0,
+            DataManager.miniMapViewMatrix[3], DataManager.miniMapViewMatrix[4], 0, 0,
             0, 0, 1, 0,
-            miniMapViewMatrix[6], miniMapViewMatrix[7], 0, 1,
+            DataManager.miniMapViewMatrix[6], DataManager.miniMapViewMatrix[7], 0, 1,
             0, 0, 0, 0  // 小地图通常不用 hoverPos，先填 0
         ]);
         // const mat4 = new Float32Array([
@@ -676,6 +678,27 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
 
         const zoomStep = 0.1 // 动态步长（随scale增大而减小）
         let newScale = e.deltaY < 0 ? scale * (1 + zoomStep) : scale * (1 - zoomStep);
+        const worldXbefore = (hoverPos1[0] + hoverPos2[0]) / 2
+        const worldYbefore = (hoverPos1[1] + hoverPos2[1]) / 2
+        console.log("before", worldXbefore, worldYbefore);
+        console.log(offset);
+
+
+        // offset[0] -= (worldXbefore - offset[0]) * (newScale / scale - 1);
+        // offset[1] -= (worldYbefore - offset[1]) * (newScale / scale - 1);
+        scale = newScale;
+
+        updateMatrix();
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) / canvas.width * 2 - 1;
+        const y = 1 - (e.clientY - rect.top) / canvas.height * 2;
+        device.queue.writeBuffer(viewRectBuffer, 0, getViewRect(canvas, viewMatrix));
+    });
+    miniMapCanvas.addEventListener("wheel", e => {
+        e.preventDefault();
+
+        const zoomStep = 0.1 // 动态步长（随scale增大而减小）
+        let newScale = e.deltaY < 0 ? scale * (1 - zoomStep) : scale * (1 + zoomStep);
         const worldXbefore = (hoverPos1[0] + hoverPos2[0]) / 2
         const worldYbefore = (hoverPos1[1] + hoverPos2[1]) / 2
         console.log("before", worldXbefore, worldYbefore);
@@ -804,7 +827,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
     canvas.addEventListener("mousedown", async e => {
         console.log("down");
 
-        dragging = true; last = [e.clientX, e.clientY];
+        signal.dragging = true; last = [e.clientX, e.clientY];
         const rect = canvas.getBoundingClientRect();
         const px = Math.floor((e.clientX - rect.left));//不要乘以 * devicePixelRatio
         const py = Math.floor((e.clientY - rect.top));
@@ -845,7 +868,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         if (undoStack[undoStack.length - 1]?.type === commandDict.DRAG) {
             undoStack[undoStack.length - 1].config.after = cloneData(data);
         }
-        dragging = false
+        signal.dragging = false
         signal.mouseDownIdFlag = false; // 重置鼠标点击 ID
         //  signal.mouseDownID = 0;
         console.log("up");
@@ -858,7 +881,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
                 undoStack.push({
                     type: commandDict.DRAG,
                     config: {
-                        before:cloneData(data)
+                        before: cloneData(data)
                     }
                 });
             }
@@ -940,7 +963,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
             hoverPos2 = [999, 999];
         }
         // 如果在拖动，也更新偏移
-        if (dragging) {
+        if (signal.dragging) {
             signal.canvasMoveFlag = true;
             const rect = canvas.getBoundingClientRect();
 
@@ -969,7 +992,64 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
 
         updateMatrix();
     });
-    let dragging = false, last = [0, 0];
+    miniMapCanvas.addEventListener("mousedown", async e => {
+        console.log("down");
+
+        signal.dragging = true; last = [e.clientX, e.clientY];
+        const rect = canvas.getBoundingClientRect();
+        const px = Math.floor((e.clientX - rect.left));//不要乘以 * devicePixelRatio
+        const py = Math.floor((e.clientY - rect.top));
+        console.log("pxpy", px, py);
+
+
+        signal.mouseDownIdFlag = true;
+
+
+    });
+    miniMapCanvas.addEventListener("mouseup", () => {
+
+        signal.dragging = false
+        console.log("up");
+
+    });
+    miniMapCanvas.addEventListener("mousemove", e => {
+
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) / canvas.width * 2 - 1;
+        const y = 1 - (e.clientY - rect.top) / canvas.height * 2;
+        const inv = mat3.create();
+        if (mat3.invert(inv, viewMatrix)) {
+            const worldX = inv[0] * x + inv[3] * y + inv[6];
+            const worldY = inv[1] * x + inv[4] * y + inv[7];
+            // console.log("moveto", worldX, worldY);
+
+            hoverPos1 = [worldX - hoverSize / 2, worldY + hoverSize / 2]; // 左上角
+            hoverPos2 = [worldX + hoverSize / 2, worldY - hoverSize / 2]; // 右下角
+        } else {
+            hoverPos1 = [999, 999];
+            hoverPos2 = [999, 999];
+        }
+        // 如果在拖动，也更新偏移
+        if (signal.dragging) {
+            signal.canvasMoveFlag = true;
+            const rect = canvas.getBoundingClientRect();
+
+            const prevX = (last[0] - rect.left) / canvas.width * 2 - 1;
+            const prevY = 1 - (last[1] - rect.top) / canvas.height * 2;
+
+            const currX = (e.clientX - rect.left) / canvas.width * 2 - 1;
+            const currY = 1 - (e.clientY - rect.top) / canvas.height * 2;
+            const miniMapPixelScale = (STYLE.nodeBound.maxX - STYLE.nodeBound.minX) / (0.9 * miniMapCanvas.width);
+            offset[0] -= (currX - prevX) * miniMapPixelScale;
+            offset[1] -= (currY - prevY) * miniMapPixelScale;
+            last = [e.clientX, e.clientY];
+
+            device.queue.writeBuffer(viewRectBuffer, 0, getViewRect(canvas, viewMatrix));
+        }
+
+        updateMatrix();
+    });
+    let last = [0, 0];
     updateMatrix();
 
     updateMiniMapMatrix()
@@ -1735,7 +1815,7 @@ function getViewRect(canvas, viewMatrix) {
     ]);
 }
 
-function getMiniMapViewMatrix(bounds, paddingRatio = 0.1) {
+function getminiMapViewMatrix(bounds, paddingRatio = 0.1) {
     const { minX, maxX, minY, maxY } = bounds;
     const w = maxX - minX;
     const h = maxY - minY;
