@@ -72,7 +72,7 @@ let eList = generateEdges(dat)
 
 
 let data
-const show = "large"
+const show = "JA2"
 switch (show) {
   case "large":
     data = {
