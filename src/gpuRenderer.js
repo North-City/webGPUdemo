@@ -5,6 +5,7 @@ let msaaTexture = null; //  提前声明全局变量
 // 字符渲染样式
 const STYLE = {
     charSize: 0.015,             // 字体宽（世界坐标）
+    charWidthRatio: 1.5,         // 字体横向放大比例（>1 变宽）
     charHeightRatio: 1.5,        // 字体高宽比
     charSpacingRatio: 0.1,       // 字符之间的空隙（占charSize的比例）
     clearColor: [1.0, 1.0, 1.0, 0.1],//background
@@ -29,7 +30,20 @@ const STYLE = {
     viewRectColor: [0.0, 0.0, 1.0, 0.1],
 
     nodeBound: null,
-    minimapMargin: 0.05
+    minimapMargin: 0.05,
+
+    // === 新增暴露的 hover/selected 样式 ===
+    rectHoverColor: [1.0, 0.0, 0.0, 0.0],
+    charHoverColor: [0.2, 0.2, 1.0, 1.0],
+    charSelectedColor: [1.0, 0.0, 0.0, 1.0],
+    charNearestSwitchThreshold: 0.03,
+    charCoverageGamma: 0.9,
+    imageHoverTint: [1.0, 1.0, 0.0, 0.15],
+    imageSelectedTint: [1.0, 0.0, 0.0, 0.25],
+    ringHoverColor: [1.0, 0.8, 0.0, 0.8],
+    ringSelectedColor: [1.0, 0.0, 0.0, 1.0],
+    ringHoverGlowWidth: 0.08,
+    ringSelectedGlowWidth: 0.12,
 };
 let signal = {
     mouseDownIdFlag: false,
@@ -95,11 +109,20 @@ export async function initWebGPU(graph) {
     });
 
     const chars = collectCharsFromGraph(graph)
-    const { texture: fontTexture, sampler: fontSampler, uvMap } = await generateDigitTexture(device, chars);
+    const { texture: fontTexture, samplerLinear: fontSampler, samplerNearest: fontSamplerNearest, uvMap } = await generateDigitTexture(device, chars);
     const imageList = ["../data/1.png"];
     const { canvas: imageCanvas, uvMap: imageUVMap } = await generateImageAtlas(imageList);
-    const imageTexture = uploadTextureByImageData(device, imageCanvas);
-    const imageSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
+    const imageTexture = uploadTextureByImageData(device, imageCanvas, { enableSRGB: true, generateMipmaps: true });
+    const imageLevelCount = Math.floor(Math.log2(Math.max(imageCanvas.width, imageCanvas.height))) + 1;
+    const imageSampler = device.createSampler({
+        magFilter: "linear",
+        minFilter: "linear",
+        mipmapFilter: "linear",
+        addressModeU: "clamp-to-edge",
+        addressModeV: "clamp-to-edge",
+        lodMinClamp: 0,
+        lodMaxClamp: imageLevelCount - 1
+    });
 
 
 
@@ -134,7 +157,8 @@ export async function initWebGPU(graph) {
             { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} }, // fontTex
             { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} }, // fontSamp
             { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} }, // imageTex
-            { binding: 4, visibility: GPUShaderStage.FRAGMENT, sampler: {} }  // imageSamp
+            { binding: 4, visibility: GPUShaderStage.FRAGMENT, sampler: {} },  // imageSamp
+            { binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: {} }   // fontSampNearest
         ]
     });
 
@@ -151,7 +175,8 @@ export async function initWebGPU(graph) {
             { binding: 1, resource: fontTexture.createView() },
             { binding: 2, resource: fontSampler },
             { binding: 3, resource: imageTexture.createView() },
-            { binding: 4, resource: imageSampler }
+            { binding: 4, resource: imageSampler },
+            { binding: 5, resource: fontSamplerNearest }
         ]
     });
 
@@ -162,7 +187,8 @@ export async function initWebGPU(graph) {
             { binding: 1, resource: fontTexture.createView() },
             { binding: 2, resource: fontSampler },
             { binding: 3, resource: imageTexture.createView() },
-            { binding: 4, resource: imageSampler }
+            { binding: 4, resource: imageSampler },
+            { binding: 5, resource: fontSamplerNearest }
         ]
     });
 
@@ -181,6 +207,7 @@ export async function initWebGPU(graph) {
     @group(0) @binding(2) var fontSamp : sampler;
     @group(0) @binding(3) var imageTex : texture_2d<f32>;
     @group(0) @binding(4) var imageSamp : sampler;
+    @group(0) @binding(5) var fontSampNearest : sampler;
 
 
       struct Out {
@@ -288,7 +315,7 @@ fn rect_vertex(input: VertexIn) -> Out {
 
   // 着色逻辑
   if (isIntersecting) {
-    out.color = vec4<f32>(1.0, 0.0, 0.0, 0.0); // 高亮
+    out.color = vec4<f32>(${STYLE.rectHoverColor.join(", ")});
   } else {
     out.color = input.instColor;
   }
@@ -325,7 +352,7 @@ fn rect_vertex(input: VertexIn) -> Out {
 @vertex
 fn char_vertex(input: CharIn) -> Out {
   var out: Out;
-  let size = vec2<f32>(${STYLE.charSize}, ${STYLE.charSize * STYLE.charHeightRatio});
+  let size = vec2<f32>(${STYLE.charSize * STYLE.charWidthRatio}, ${STYLE.charSize * STYLE.charHeightRatio});
   let offset = input.pos * size;
   let world = input.center + offset;
   out.position = uniforms.viewMatrix * vec4<f32>(world, 0.0, 1.0);
@@ -334,6 +361,27 @@ fn char_vertex(input: CharIn) -> Out {
     mix(input.u0, input.u1, input.pos.x * 0.5 + 0.5),
     mix(input.v0, input.v1, input.pos.y * -0.5 + 0.5)
   );
+
+  // 计算字符矩形与 hover 区是否相交
+  let halfW = size.x * 0.5;
+  let halfH = size.y * 0.5;
+  let left   = input.center.x - halfW;
+  let right  = input.center.x + halfW;
+  let top    = input.center.y + halfH;
+  let bottom = input.center.y - halfH;
+
+  let hoverLeft   = uniforms.hoverPos1.x;
+  let hoverTop    = uniforms.hoverPos1.y;
+  let hoverRight  = uniforms.hoverPos2.x;
+  let hoverBottom = uniforms.hoverPos2.y;
+
+  let isIntersecting =
+      right >= hoverLeft &&
+      left <= hoverRight &&
+      top >= hoverBottom &&
+      bottom <= hoverTop;
+
+  out.isHighlight = select(0.0, 1.0, isIntersecting);
   out.selected = input.selected;
   return out;
 }
@@ -355,7 +403,7 @@ fn ring_vertex(input: RingIn) -> Out {
   out.uv = input.pos;
   out.strokeWidth = input.strokeWidth;
 
-  // === 高亮判断 ===
+  // === hover 判断（圆心到 hover 矩形的最近点距离） ===
   let cx = input.center.x;
   let cy = input.center.y;
   let r  = input.radius;
@@ -370,15 +418,11 @@ fn ring_vertex(input: RingIn) -> Out {
   let distSq = (cx - closestX) * (cx - closestX) + (cy - closestY) * (cy - closestY);
   let isHover = distSq <= r * r / 4;
 
-  let isSelected = input.selected > 0.0;
-
-  let shouldHighlight = isHover || isSelected;
-
   let baseColor = vec4<f32>(${STYLE.ringColor.join(", ")});
-  let highlightColor = vec4<f32>(${STYLE.ringHighlightColor.join(", ")});
 
-  out.color = select(baseColor, highlightColor, shouldHighlight);
-  out.isHighlight = select(0.0, 1.0, shouldHighlight);
+  out.color = baseColor;
+  out.isHighlight = select(0.0, 1.0, isHover);
+  out.selected = input.selected;
   return out;
 }
 
@@ -395,19 +439,31 @@ fn ring_vertex(input: RingIn) -> Out {
 
         @fragment
         fn char_frag(input: Out) -> @location(0) vec4<f32> {
-        let tex = textureSample(fontTex, fontSamp, input.uv);
+        let texLinear = textureSample(fontTex, fontSamp, input.uv);
+        let texNearest = textureSample(fontTex, fontSampNearest, input.uv);
 
-        if (tex.a < 0.01) {
-            discard; // ✅ 透明区域不绘制
-        }
+        let w = fwidth(texLinear.a);
+        let t0 = ${STYLE.charNearestSwitchThreshold};
+        let t1 = ${STYLE.charNearestSwitchThreshold} * 2.0;
+        let nearestWeight = 1.0 - smoothstep(t0, t1, w);
+        let alphaSample = mix(texLinear.a, texNearest.a, nearestWeight);
 
-        var fontColor = vec4<f32>(${STYLE.charColor.join(", ")});
+        let wAdj = max(w, 1e-3);
+        var coverage = smoothstep(0.5 - 0.5 * wAdj, 0.5 + 0.5 * wAdj, alphaSample);
+        coverage = pow(coverage, ${STYLE.charCoverageGamma});
 
-        if(input.selected > 0.0) {
-            fontColor =  vec4<f32>(1.0, 0.0, 0.0, 1.0);
-        } 
-        
-        return vec4<f32>(fontColor.rgb, fontColor.a * tex.a);
+        let baseColor = vec4<f32>(${STYLE.charColor.join(", ")});
+        let hoverColor = vec4<f32>(${STYLE.charHoverColor.join(", ")});
+        let selectedColor = vec4<f32>(${STYLE.charSelectedColor.join(", ")});
+
+        let hoverAlpha = input.isHighlight;
+        let selectedAlpha = select(0.0, 1.0, input.selected > 0.0);
+
+        var finalColor = baseColor;
+        finalColor = mix(finalColor, hoverColor, hoverAlpha);
+        finalColor = mix(finalColor, selectedColor, selectedAlpha);
+
+        return vec4<f32>(finalColor.rgb, finalColor.a * coverage);
         }
 
         @vertex
@@ -416,53 +472,85 @@ fn image_vertex(input: ImageIn) -> Out {
   let world = input.instPos + input.pos * input.instSize;
   out.position = uniforms.viewMatrix * vec4<f32>(world, 0.0, 1.0);
   out.uv = vec2<f32>(
-    mix(input.u0, input.u1, input.pos.x+ 0.5),
-    mix(input.v1, input.v0, input.pos.y+ 0.5)
+    mix(input.u0, input.u1, input.pos.x + 0.5),
+    mix(input.v1, input.v0, input.pos.y + 0.5)
   );
   out.color = vec4<f32>(1.0);
+
+  // 计算图片矩形与 hover 区是否相交
+  let left   = input.instPos.x - input.instSize.x / 2.0;
+  let right  = input.instPos.x + input.instSize.x / 2.0;
+  let top    = input.instPos.y + input.instSize.y / 2.0;
+  let bottom = input.instPos.y - input.instSize.y / 2.0;
+
+  let hoverLeft   = uniforms.hoverPos1.x;
+  let hoverTop    = uniforms.hoverPos1.y;
+  let hoverRight  = uniforms.hoverPos2.x;
+  let hoverBottom = uniforms.hoverPos2.y;
+
+  let isIntersecting =
+      right >= hoverLeft &&
+      left <= hoverRight &&
+      top >= hoverBottom &&
+      bottom <= hoverTop;
+
+  out.isHighlight = select(0.0, 1.0, isIntersecting);
+  out.selected = input.selected;
+
   return out;
 }
 @fragment
 fn image_frag(input: Out) -> @location(0) vec4<f32> {
-  return textureSample(imageTex, imageSamp, input.uv);
+  let c = textureSample(imageTex, imageSamp, input.uv);
+  let hoverTint = vec4<f32>(${STYLE.imageHoverTint.join(", ")});
+  let selectedTint = vec4<f32>(${STYLE.imageSelectedTint.join(", ")});
+  let hoverAlpha = input.isHighlight * hoverTint.a;
+  let selectedAlpha = select(0.0, selectedTint.a, input.selected > 0.0);
+
+  let rgbHover = mix(c.rgb, hoverTint.rgb, hoverAlpha);
+  let rgbSelected = mix(rgbHover, selectedTint.rgb, selectedAlpha);
+
+  return vec4<f32>(rgbSelected, c.a);
 } 
 
 @fragment
 fn ring_frag(input: Out) -> @location(0) vec4<f32> {
-  let r = length(input.uv);  // 当前像素到圆中心的归一化距离
+  let r = length(input.uv);
   let outer = 0.4;
   let inner = outer - outer * input.strokeWidth;
-  let highlightWidth = 0.1;
   let edgeWidth = 0.01;
 
-  // 提前裁剪
-  if (r > outer + highlightWidth + edgeWidth) {
+  // 提前裁剪到最大高亮带之外
+  if (r > outer + max(${STYLE.ringHoverGlowWidth}, ${STYLE.ringSelectedGlowWidth}) + edgeWidth) {
     discard;
   }
 
-  // ========== 圆环主区域 ========== //
+  // 主环区域
   let tInner = smoothstep(inner - edgeWidth, inner + edgeWidth, r);
   let tOuter = 1.0 - smoothstep(outer - edgeWidth, outer + edgeWidth, r);
   let ringAlpha = tInner * tOuter;
   let baseColor = input.color;
   let baseAlpha = ringAlpha * baseColor.a;
 
-  // ========== 外部模糊高亮带 ========== //
-  let highlightColor = vec4<f32>(${STYLE.ringHighlightColor.join(", ")});
-  let tHighlight = smoothstep(outer, outer + highlightWidth, r);
-  let highlightAlpha = (1.0 - tHighlight) * input.isHighlight;
+  // 外部 hover / selected 模糊带
+  let hoverColor = vec4<f32>(${STYLE.ringHoverColor.join(", ")});
+  let selectedColor = vec4<f32>(${STYLE.ringSelectedColor.join(", ")});
+  let tHover = smoothstep(outer, outer + ${STYLE.ringHoverGlowWidth}, r);
+  let tSelected = smoothstep(outer, outer + ${STYLE.ringSelectedGlowWidth}, r);
+  let hoverAlpha = (1.0 - tHover) * input.isHighlight;
+  let selectedAlpha = (1.0 - tSelected) * select(0.0, 1.0, input.selected > 0.0);
 
-  // ========== 合成逻辑 ========== //
+  // 合成
   var finalColor = baseColor;
   var finalAlpha = baseAlpha;
-
-  // 只对 r ≥ inner 的区域执行颜色合成（防止中心发红）
   if (r >= inner) {
-    finalColor = mix(baseColor, highlightColor, highlightAlpha);
-    finalAlpha = max(baseAlpha, highlightAlpha * highlightColor.a);
+    let mixedHoverColor = mix(finalColor, hoverColor, hoverAlpha);
+    let mixedHoverAlpha = max(finalAlpha, hoverAlpha * hoverColor.a);
+    finalColor = mix(mixedHoverColor, selectedColor, selectedAlpha);
+    finalAlpha = max(mixedHoverAlpha, selectedAlpha * selectedColor.a);
   }
 
-  return vec4(finalColor.rgb, finalAlpha);
+  return vec4<f32>(finalColor.rgb, finalAlpha);
 }
 
 
@@ -518,6 +606,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
 
 
     // === 创建 pipelines（矩形、边、箭头、字符）
+    /*
     const rectPipeline = createPipeline(device, shaderModule, pipelineLayout, format, "rect_vertex", "fragment_main", [
         { arrayStride: 8, stepMode: "vertex", attributes: [{ shaderLocation: 0, format: "float32x2", offset: 0 }] },
         {
@@ -530,6 +619,7 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
             ]
         }
     ], "triangle-strip", sampleCount);
+    */
 
     const linePipeline = createPipeline(device, shaderModule, pipelineLayout, format, "simple_vertex", "fragment_main", [
         {
@@ -725,6 +815,20 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
             signal.canvasMoveFlag = false;
             return
         }
+
+        // 背景点击时：清除所有选中状态
+        if (matchColorID(signal.mouseDownID, [0, 0, 0])) {
+            clearAllSelections(data);
+            device.queue.writeBuffer(rectBuffer, 0, data.rects.buffer);
+            device.queue.writeBuffer(ringInstanceBuffer, 0, data.ringInstances.buffer);
+            device.queue.writeBuffer(imageInstanceBuffer, 0, data.imageInstances.buffer);
+            device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
+
+            signal.mouseDownIdFlag = false; // 重置鼠标点击 ID
+            console.log("cleared selection by background click");
+            return;
+        }
+
         const select = true
         undoStack.push({
             type: commandDict.CLICK,
@@ -748,6 +852,21 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
 
         console.log("click2");
     });
+
+    // 清除所有实例的选中位（最后一位）
+    function clearAllSelections(data) {
+        const clear = (arr, stride) => {
+            if (!arr || !arr.length || stride <= 0) return;
+            for (let i = stride - 1; i < arr.length; i += stride) {
+                arr[i] = 0;
+            }
+        };
+        // 主画布实例
+        clear(data.rects, 13);
+        clear(data.ringInstances, 9);
+        clear(data.imageInstances, 13);
+        clear(data.charData, 11);
+    }
 
 
     window.addEventListener("keydown", e => {
@@ -1086,10 +1205,10 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
         pass.setVertexBuffer(0, lineBuffer);
         pass.draw(data.polylines.length / 6);
 
-        pass.setPipeline(rectPipeline);
-        pass.setVertexBuffer(0, quadBuffer);
-        pass.setVertexBuffer(1, rectBuffer);
-        pass.draw(4, data.rects.length / 13);
+        // pass.setPipeline(rectPipeline);
+        // pass.setVertexBuffer(0, quadBuffer);
+        // pass.setVertexBuffer(1, rectBuffer);
+        // pass.draw(4, data.rects.length / 13);
 
         pass.setPipeline(imagePipeline);
         pass.setVertexBuffer(0, quadBuffer);
@@ -1242,7 +1361,7 @@ function generateDigitTextureCanvas() {
 
 function generateCharTextureCanvas(charList) {
     const fontSize = 72;
-    const padding = 20;
+    const padding = 40;
     const maxTextureWidth = 8192;
 
     const ctx = document.createElement("canvas").getContext("2d");
@@ -1290,10 +1409,12 @@ function generateCharTextureCanvas(charList) {
             const y = rowIndex * cellHeights + cellHeights / 2;
             ctx2.fillText(item.char, x + padding, y);
 
-            const u0 = x / canvas.width;
-            const u1 = (x + item.width) / canvas.width;
-            const v0 = rowIndex * cellHeights / canvas.height;
-            const v1 = (rowIndex * cellHeights + cellHeights) / canvas.height;
+            const epsU = 0.5 / canvas.width;
+            const epsV = 0.5 / canvas.height;
+            const u0 = x / canvas.width + epsU;
+            const u1 = (x + item.width) / canvas.width - epsU;
+            const v0 = rowIndex * cellHeights / canvas.height + epsV;
+            const v1 = (rowIndex * cellHeights + cellHeights) / canvas.height - epsV;
 
             uvMap[item.char] = [u0, u1, v0, v1];
             x += item.width;
@@ -1342,46 +1463,87 @@ async function generateImageAtlas(imageList) {
 
 
 async function generateDigitTexture(device, charList) {
-    // const canvas = generateDigitTextureCanvas(); // 你已有的图集绘制逻辑
-    const { canvas, uvMap } = generateCharTextureCanvas(charList)
-    const texture = uploadTextureByImageData(device, canvas);
-    const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
-    return { texture, sampler, uvMap };
+    const { canvas, uvMap } = generateCharTextureCanvas(charList);
+    const levelCount = Math.floor(Math.log2(Math.max(canvas.width, canvas.height))) + 1;
+    const texture = uploadTextureByImageData(device, canvas, { enableSRGB: true, generateMipmaps: true });
+    const sampler = device.createSampler({
+        magFilter: "linear",
+        minFilter: "linear",
+        mipmapFilter: "linear",
+        addressModeU: "clamp-to-edge",
+        addressModeV: "clamp-to-edge",
+        lodMinClamp: 0,
+        lodMaxClamp: levelCount - 1
+    });
+    const samplerNearest = device.createSampler({
+        magFilter: "nearest",
+        minFilter: "nearest",
+        mipmapFilter: "nearest",
+        addressModeU: "clamp-to-edge",
+        addressModeV: "clamp-to-edge",
+        lodMinClamp: 0,
+        lodMaxClamp: levelCount - 1
+    });
+    return { texture, samplerLinear: sampler, samplerNearest, uvMap };
 }
 
-function uploadTextureByImageData(device, canvas) {
-    const ctx = canvas.getContext("2d");
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const rgba = new Uint8Array(imageData.data);
-
-    const bytesPerPixel = 4;
-    const unpaddedBytesPerRow = canvas.width * bytesPerPixel;
-    const paddedBytesPerRow = Math.ceil(unpaddedBytesPerRow / 256) * 256;
-
-    const paddedData = new Uint8Array(paddedBytesPerRow * canvas.height);
-
-    // 每行拷贝原始数据 → paddedData
-    for (let y = 0; y < canvas.height; y++) {
-        const srcOffset = y * unpaddedBytesPerRow;
-        const dstOffset = y * paddedBytesPerRow;
-        paddedData.set(rgba.subarray(srcOffset, srcOffset + unpaddedBytesPerRow), dstOffset);
-    }
+function uploadTextureByImageData(device, sourceCanvas, options = {}) {
+    const { enableSRGB = false, generateMipmaps = false } = options;
+    const width = sourceCanvas.width;
+    const height = sourceCanvas.height;
+    const levelCount = generateMipmaps ? (Math.floor(Math.log2(Math.max(width, height))) + 1) : 1;
+    const format = enableSRGB ? "rgba8unorm-srgb" : "rgba8unorm";
 
     const texture = device.createTexture({
-        size: [canvas.width, canvas.height],
-        format: "rgba8unorm",
+        size: [width, height],
+        format,
+        mipLevelCount: levelCount,
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
     });
 
-    device.queue.writeTexture(
-        { texture },
-        paddedData,
-        {
-            bytesPerRow: paddedBytesPerRow,
-            rowsPerImage: canvas.height
-        },
-        [canvas.width, canvas.height]
-    );
+    let canvas = sourceCanvas;
+    let w = width;
+    let h = height;
+
+    for (let level = 0; level < levelCount; level++) {
+        const ctx = canvas.getContext("2d");
+        const imageData = ctx.getImageData(0, 0, w, h);
+        const rgba = new Uint8Array(imageData.data);
+
+        const bytesPerPixel = 4;
+        const unpaddedBytesPerRow = w * bytesPerPixel;
+        const paddedBytesPerRow = Math.ceil(unpaddedBytesPerRow / 256) * 256;
+        const paddedData = new Uint8Array(paddedBytesPerRow * h);
+
+        for (let y = 0; y < h; y++) {
+            const srcOffset = y * unpaddedBytesPerRow;
+            const dstOffset = y * paddedBytesPerRow;
+            paddedData.set(rgba.subarray(srcOffset, srcOffset + unpaddedBytesPerRow), dstOffset);
+        }
+
+        device.queue.writeTexture(
+            { texture, mipLevel: level, origin: { x: 0, y: 0 } },
+            paddedData,
+            { bytesPerRow: paddedBytesPerRow, rowsPerImage: h },
+            { width: w, height: h }
+        );
+
+        if (generateMipmaps && level + 1 < levelCount) {
+            const nextW = Math.max(1, Math.floor(w / 2));
+            const nextH = Math.max(1, Math.floor(h / 2));
+            const downCanvas = document.createElement("canvas");
+            downCanvas.width = nextW;
+            downCanvas.height = nextH;
+            const downCtx = downCanvas.getContext("2d", { alpha: true });
+            downCtx.imageSmoothingEnabled = true;
+            downCtx.imageSmoothingQuality = "high";
+            downCtx.drawImage(canvas, 0, 0, w, h, 0, 0, nextW, nextH);
+            canvas = downCanvas;
+            w = nextW;
+            h = nextH;
+        }
+    }
+
     return texture;
 }
 
@@ -1441,8 +1603,9 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
 
         const idStr = node.label.toString();
         const charSize = STYLE.charSize;
-        const charSpacing = charSize * STYLE.charSpacingRatio;
-        const step = charSize + charSpacing;
+        const charWidthRatio = STYLE.charWidthRatio || 1.0;
+        const charSpacing = charSize * charWidthRatio * STYLE.charSpacingRatio;
+        const step = charSize * charWidthRatio + charSpacing;
         const baseX = x - (idStr.length - 1) * step * 0.5;//字符相对节点中心位置的偏移
 
         for (let i = 0; i < idStr.length; i++) {
