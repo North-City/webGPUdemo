@@ -18,6 +18,9 @@ const STYLE = {
     // 连线样式
     edgeColor: [0.5, 0.5, 0.5, 0.5],
     edgeColor_mini: [0.5, 0.5, 0.5, 1.0],
+    edgeCurveOffsetRatioX: 0.75, // X方向曲率：相对连线长度的偏移比例
+    edgeCurveOffsetRatioY: 0.5, // Y方向曲率：相对连线长度的偏移比例
+    edgeCurveSegments: 24,     // 采样段数：越大越平滑
 
     // 箭头样式
     arrowColor: [0.3, 0.3, 0.3, 1.0],
@@ -1052,11 +1055,12 @@ fn ring_pick_frag(input: Out) -> @location(0) vec4<f32> {
                 markMoveById(signal.mouseDownID, data.charData, 11, -1, [shiftX, shiftY]);
                 device.queue.writeBuffer(charInstanceBuffer, 0, data.charData.buffer);
 
-                arrowMoveById(signal.mouseDownID, data.arrowSegments, 12, -1, [shiftX, shiftY]);
-                device.queue.writeBuffer(arrowInstanceBuffer, 0, data.arrowSegments.buffer);
-
+                // 先更新边折线，再重算箭头以保持方向一致
                 edgeMoveById(signal.mouseDownID, data.polylines, 12, -1, [shiftX, shiftY]);
                 device.queue.writeBuffer(lineBuffer, 0, data.polylines.buffer);
+
+                arrowMoveById(signal.mouseDownID, data.arrowSegments, 12, -1, [shiftX, shiftY], data.polylines, 12, -1);
+                device.queue.writeBuffer(arrowInstanceBuffer, 0, data.arrowSegments.buffer);
 
 
 
@@ -1657,16 +1661,62 @@ function extractDataFromG6(graph, canvas, uvMap, imageUVMap) {
         } else {
             const [x1, y1] = scale(edge.startPoint.x, edge.startPoint.y);
             const [x2, y2] = scale(edge.endPoint.x, edge.endPoint.y);
-            polylines.push(x1, y1, ...edge.sourceColorId, x2, y2, ...edge.targetColorId);
-            polylines_mini.push(edge.startPoint.x, edge.startPoint.y, ...edge.sourceColorId, edge.endPoint.x, edge.endPoint.y, ...edge.targetColorId);
-            DataManager.adjGraph.get([edge.sourceColorId[0], edge.sourceColorId[1], edge.sourceColorId[2]].join(",")).add(edgeOffsetCount);
-            DataManager.adjGraph.get([edge.targetColorId[0], edge.targetColorId[1], edge.targetColorId[2]].join(",")).add(edgeOffsetCount++);
+            // 使用起点终点构成的矩形角点，构造“中心对称”的四次贝塞尔：P1=(sx,ty), P2=中心, P3=(tx,sy)
+            const sx = x1, sy = y1;
+            const tx = x2, ty = y2;
+            const midx = (sx + tx) * 0.5;
+            const midy = (sy + ty) * 0.5;
+            const alphaX = (STYLE.edgeCurveOffsetRatioX ?? 0.25); // X方向插值比例
+            const alphaY = (STYLE.edgeCurveOffsetRatioY ?? 0.25); // Y方向插值比例
+            const p1x = tx * (1 - alphaX) + midx * alphaX; // 终点角点 -> 中心，X方向插值
+            const p1y = sy * (1 - alphaY) + midy * alphaY; // 终点角点 -> 中心，Y方向插值
+            const p2x = midx, p2y = midy; // 中心点，保证中心对称
+            const p3x = sx * (1 - alphaX) + midx * alphaX; // 起点角点 -> 中心，X方向插值
+            const p3y = ty * (1 - alphaY) + midy * alphaY; // 起点角点 -> 中心，Y方向插值
 
-            arrows.push(x1, y1, x2, y2, ...edge.sourceColorId, ...edge.targetColorId);
+            const segs = Math.max(8, Math.floor(STYLE.edgeCurveSegments ?? 24));
+            let ax0_last = sx, ay0_last = sy, ax1_last = sx, ay1_last = sy; // 记录最后一段采样
+            for (let i = 0; i < segs; i++) {
+                const t0 = i / segs;
+                const t1 = (i + 1) / segs;
+                const u0 = 1 - t0, u1 = 1 - t1;
+                const ax0 = u0*u0*u0*u0 * sx + 4*u0*u0*u0*t0 * p1x + 6*u0*u0*t0*t0 * p2x + 4*u0*t0*t0*t0 * p3x + t0*t0*t0*t0 * tx;
+                const ay0 = u0*u0*u0*u0 * sy + 4*u0*u0*u0*t0 * p1y + 6*u0*u0*t0*t0 * p2y + 4*u0*t0*t0*t0 * p3y + t0*t0*t0*t0 * ty;
+                const ax1 = u1*u1*u1*u1 * sx + 4*u1*u1*u1*t1 * p1x + 6*u1*u1*t1*t1 * p2x + 4*u1*t1*t1*t1 * p3x + t1*t1*t1*t1 * tx;
+                const ay1 = u1*u1*u1*u1 * sy + 4*u1*u1*u1*t1 * p1y + 6*u1*u1*t1*t1 * p2y + 4*u1*t1*t1*t1 * p3y + t1*t1*t1*t1 * ty;
+                polylines.push(ax0, ay0, ...edge.sourceColorId, ax1, ay1, ...edge.targetColorId);
+                ax0_last = ax0; ay0_last = ay0; ax1_last = ax1; ay1_last = ay1; // 更新最后一段
+                // 最小地图：用像素坐标采样同样的“四次中心对称曲线”
+                const csx = edge.startPoint.x, csy = edge.startPoint.y;
+                const ctx = edge.endPoint.x, cty = edge.endPoint.y;
+                const cmidx = (csx + ctx) * 0.5;
+                const cmidy = (csy + cty) * 0.5;
+                const cp1x = ctx * (1 - alphaX) + cmidx * alphaX; // 终点角点 -> 中心，X方向插值
+                const cp1y = csy * (1 - alphaY) + cmidy * alphaY; // 终点角点 -> 中心，Y方向插值
+                const cp2x = cmidx, cp2y = cmidy;
+                const cp3x = csx * (1 - alphaX) + cmidx * alphaX; // 起点角点 -> 中心，X方向插值
+                const cp3y = cty * (1 - alphaY) + cmidy * alphaY; // 起点角点 -> 中心，Y方向插值
+                const cx0 = (1 - t0)**4 * csx + 4*(1 - t0)**3 * t0 * cp1x + 6*(1 - t0)**2 * t0**2 * cp2x + 4*(1 - t0) * t0**3 * cp3x + t0**4 * ctx;
+                const cy0 = (1 - t0)**4 * csy + 4*(1 - t0)**3 * t0 * cp1y + 6*(1 - t0)**2 * t0**2 * cp2y + 4*(1 - t0) * t0**3 * cp3y + t0**4 * cty;
+                const cx1 = (1 - t1)**4 * csx + 4*(1 - t1)**3 * t1 * cp1x + 6*(1 - t1)**2 * t1**2 * cp2x + 4*(1 - t1) * t1**3 * cp3x + t1**4 * ctx;
+                const cy1 = (1 - t1)**4 * csy + 4*(1 - t1)**3 * t1 * cp1y + 6*(1 - t1)**2 * t1**2 * cp2y + 4*(1 - t1) * t1**3 * cp3y + t1**4 * cty;
+                polylines_mini.push(cx0, cy0, ...edge.sourceColorId, cx1, cy1, ...edge.targetColorId);
+
+                DataManager.adjGraph.get([edge.sourceColorId[0], edge.sourceColorId[1], edge.sourceColorId[2]].join(",")).add(edgeOffsetCount);
+                DataManager.adjGraph.get([edge.targetColorId[0], edge.targetColorId[1], edge.targetColorId[2]].join(",")).add(edgeOffsetCount++);
+            }
+
+            // 箭头使用四次贝塞尔在 t=1 的切线方向：B'(1) = 4*(P4 - P1)（靠近终点的角点）
+            const tx_dx = 4 * (tx - p1x);
+            const tx_dy = 4 * (ty - p1y);
+            const L_last = Math.hypot(ax1_last - ax0_last, ay1_last - ay0_last) || 1.0;
+            const nearDist = (STYLE.arrowSize ?? 0.03) * 0.5;
+            const r = Math.min(1.0, nearDist / L_last);
+            const px1 = x2 * (1 - r) + ax0_last * r; // 基点位于最后一段折线上
+            const py1 = y2 * (1 - r) + ay0_last * r;
+            arrows.push(px1, py1, x2, y2, ...edge.sourceColorId, ...edge.targetColorId);
             DataManager.adjGraph_arrow.get([edge.sourceColorId[0], edge.sourceColorId[1], edge.sourceColorId[2]].join(",")).add(arrowOffsetCount);
             DataManager.adjGraph_arrow.get([edge.targetColorId[0], edge.targetColorId[1], edge.targetColorId[2]].join(",")).add(arrowOffsetCount++);
-            // const [x1_mini, y1_mini] = toNDC(edge.startPoint.x, edge.startPoint.y);
-            // const [x2_mini, y2_mini] = toNDC(edge.endPoint.x, edge.endPoint.y);
         }
 
     });
@@ -1781,75 +1831,249 @@ function markMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY]) {
     }
 }
 
-function arrowMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY]) {
+function arrowMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY], polyArr = null, polyStride = 12, polySelectedOffset = -1) {
     const strColorId = id.join(",");
-    const decodeColor = decodeColorToIdFloat(...id);
-    for (const value of DataManager.adjGraph_arrow.get(strColorId)) {
-        let i = value + 1; // +1 因为数据从 1 开始
+    const movedId = decodeColorToIdFloat(...id);
+    const arrowIdxSet = DataManager.adjGraph_arrow.get(strColorId) ?? new Set();
 
-        let [rSource, gSource, bSource] = [arr[i * stride + selectedOffset - 7], arr[i * stride + selectedOffset - 6], arr[i * stride + selectedOffset - 5]]
-        let [rTarget, gTarget, bTarget] = [arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2], arr[i * stride + selectedOffset - 1]]
-        const sourceId = decodeColorToIdFloat(rSource, gSource, bSource);
-        const targetId = decodeColorToIdFloat(rTarget, gTarget, bTarget);
+    for (const value of arrowIdxSet) {
+        const i = value + 1; // 数据从 1 开始
+        const rS = arr[i * stride + selectedOffset - 7];
+        const gS = arr[i * stride + selectedOffset - 6];
+        const bS = arr[i * stride + selectedOffset - 5];
+        const rT = arr[i * stride + selectedOffset - 3];
+        const gT = arr[i * stride + selectedOffset - 2];
+        const bT = arr[i * stride + selectedOffset - 1];
+        const sId = decodeColorToIdFloat(rS, gS, bS);
+        const tId = decodeColorToIdFloat(rT, gT, bT);
 
-        if (sourceId === decodeColor) {
-            arr[(i - 1) * stride] += shiftX
-            arr[(i - 1) * stride + 1] += shiftY
+        // 自环：直接整体平移箭头，保持原有形状与方向
+        if (sId === tId && sId === movedId) {
+            arr[(i - 1) * stride + 0] += shiftX;
+            arr[(i - 1) * stride + 1] += shiftY;
+            arr[(i - 1) * stride + 2] += shiftX;
+            arr[(i - 1) * stride + 3] += shiftY;
+            continue;
         }
-        if (targetId === decodeColor) {
-            arr[(i - 1) * stride + 2] += shiftX
-            arr[(i - 1) * stride + 3] += shiftY
+
+        if (!polyArr) {
+            // 回退：若无折线数据，则按旧逻辑平移箭头端点
+            if (sId === movedId) {
+                arr[(i - 1) * stride + 0] += shiftX;
+                arr[(i - 1) * stride + 1] += shiftY;
+            }
+            if (tId === movedId) {
+                arr[(i - 1) * stride + 2] += shiftX;
+                arr[(i - 1) * stride + 3] += shiftY;
+            }
+            continue;
         }
+
+        // 通过 sourceId 在邻接集中筛选出与 targetId 匹配的所有分段索引
+        const sourceStr = [rS, gS, bS].join(",");
+        const targetStr = [rT, gT, bT].join(",");
+        const segIdxSet = DataManager.adjGraph.get(sourceStr) ?? new Set();
+        const segIdxList = [];
+        for (const segValue of segIdxSet) {
+            const si = segValue + 1;
+            const rTargetSeg = polyArr[si * polyStride + polySelectedOffset - 3];
+            const gTargetSeg = polyArr[si * polyStride + polySelectedOffset - 2];
+            const bTargetSeg = polyArr[si * polyStride + polySelectedOffset - 1];
+            if (rTargetSeg === rT && gTargetSeg === gT && bTargetSeg === bT) {
+                segIdxList.push(segValue);
+            }
+        }
+        if (segIdxList.length === 0) {
+            // 若未找到分段，保持旧逻辑平移
+            if (sId === movedId) {
+                arr[(i - 1) * stride + 0] += shiftX;
+                arr[(i - 1) * stride + 1] += shiftY;
+            }
+            if (tId === movedId) {
+                arr[(i - 1) * stride + 2] += shiftX;
+                arr[(i - 1) * stride + 3] += shiftY;
+            }
+            continue;
+        }
+        segIdxList.sort((a, b) => a - b);
+        const lastSegI = segIdxList[segIdxList.length - 1] + 1;
+        const ax0 = polyArr[(lastSegI - 1) * polyStride + 0];
+        const ay0 = polyArr[(lastSegI - 1) * polyStride + 1];
+        const ax1 = polyArr[(lastSegI - 1) * polyStride + 6];
+        const ay1 = polyArr[(lastSegI - 1) * polyStride + 7];
+
+        // 以最后一段为方向，箭头尖端贴合终点，基点按 nearDist 后退
+        const L = Math.hypot(ax1 - ax0, ay1 - ay0) || 1.0;
+        const nearDist = (STYLE.arrowSize ?? 0.03) * 0.5;
+        const r = Math.min(1.0, nearDist / L);
+        const px1 = ax1 * (1 - r) + ax0 * r;
+        const py1 = ay1 * (1 - r) + ay0 * r;
+        const tipX = ax1;
+        const tipY = ay1;
+
+        // 写回箭头实例
+        arr[(i - 1) * stride + 0] = px1;
+        arr[(i - 1) * stride + 1] = py1;
+        arr[(i - 1) * stride + 2] = tipX;
+        arr[(i - 1) * stride + 3] = tipY;
     }
-
 }
 
 function edgeMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY]) {
     const strColorId = id.join(",");
-    const decodeColor = decodeColorToIdFloat(...id);
-    for (const value of DataManager.adjGraph.get(strColorId)) {
-        let i = value + 1; // +1 因为数据从 1 开始
+    const movedId = decodeColorToIdFloat(...id);
+    const indices = Array.from(DataManager.adjGraph.get(strColorId) ?? []);
+    if (indices.length === 0) return;
 
-        let [rSource, gSource, bSource] = [arr[i * stride + selectedOffset - 9], arr[i * stride + selectedOffset - 8], arr[i * stride + selectedOffset - 7]]
-        let [rTarget, gTarget, bTarget] = [arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2], arr[i * stride + selectedOffset - 1]]
-        const sourceId = decodeColorToIdFloat(rSource, gSource, bSource);
-        const targetId = decodeColorToIdFloat(rTarget, gTarget, bTarget);
+    // 收集自环分段：source 与 target 相同且等于被拖动的节点
+    const selfLoopIdx = [];
 
-        if (sourceId === decodeColor) {
-            arr[(i - 1) * stride] += shiftX
-            arr[(i - 1) * stride + 1] += shiftY
+    // 将属于同一条边的分段按“另一端节点ID”分组（仅非自环）
+    const groups = new Map(); // otherIdStr -> {idxList: number[], sourceIsMoved: boolean}
+    for (const value of indices) {
+        const i = value + 1; // 数据从1开始
+        const rS = arr[i * stride + selectedOffset - 9];
+        const gS = arr[i * stride + selectedOffset - 8];
+        const bS = arr[i * stride + selectedOffset - 7];
+        const rT = arr[i * stride + selectedOffset - 3];
+        const gT = arr[i * stride + selectedOffset - 2];
+        const bT = arr[i * stride + selectedOffset - 1];
+        const sId = decodeColorToIdFloat(rS, gS, bS);
+        const tId = decodeColorToIdFloat(rT, gT, bT);
+
+        // 自环分段直接记录，后续整体平移
+        if (sId === tId && sId === movedId) {
+            selfLoopIdx.push(value);
+            continue;
         }
-        if (targetId === decodeColor) {
-            arr[(i - 1) * stride + 6] += shiftX
-            arr[(i - 1) * stride + 7] += shiftY
-        }
+
+        const sourceIsMoved = (sId === movedId);
+        const otherStr = [sourceIsMoved ? rT : rS, sourceIsMoved ? gT : gS, sourceIsMoved ? bT : bS].join(",");
+        const g = groups.get(otherStr) ?? { idxList: [], sourceIsMoved };
+        g.idxList.push(value);
+        g.sourceIsMoved = sourceIsMoved; // 保持一致
+        groups.set(otherStr, g);
     }
 
+    // 先处理自环：三段线段整体平移，不做贝塞尔重采样
+    for (const value of selfLoopIdx) {
+        const i = value + 1;
+        arr[(i - 1) * stride + 0] += shiftX;
+        arr[(i - 1) * stride + 1] += shiftY;
+        arr[(i - 1) * stride + 6] += shiftX;
+        arr[(i - 1) * stride + 7] += shiftY;
+    }
 
+    const alphaX = (STYLE.edgeCurveOffsetRatioX ?? 0.25);
+    const alphaY = (STYLE.edgeCurveOffsetRatioY ?? 0.25);
+
+    // 对每一条非自环边整段重算采样
+    for (const [_, g] of groups.entries()) {
+        const idxList = g.idxList.sort((a, b) => a - b);
+        const segCount = idxList.length;
+        if (segCount === 0) continue;
+        const startI = idxList[0] + 1;
+        const endI = idxList[segCount - 1] + 1;
+        // 读取当前端点坐标
+        let sx = arr[(startI - 1) * stride + 0];
+        let sy = arr[(startI - 1) * stride + 1];
+        let tx = arr[(endI - 1) * stride + 6];
+        let ty = arr[(endI - 1) * stride + 7];
+        // 应用拖动位移到移动的端点
+        if (g.sourceIsMoved) {
+            sx += shiftX; sy += shiftY;
+        } else {
+            tx += shiftX; ty += shiftY;
+        }
+        const midx = (sx + tx) * 0.5;
+        const midy = (sy + ty) * 0.5;
+        const p1x = tx * (1 - alphaX) + midx * alphaX;
+        const p1y = sy * (1 - alphaY) + midy * alphaY;
+        const p2x = midx, p2y = midy;
+        const p3x = sx * (1 - alphaX) + midx * alphaX;
+        const p3y = ty * (1 - alphaY) + midy * alphaY;
+
+        for (let j = 0; j < segCount; j++) {
+            const value = idxList[j];
+            const i = value + 1;
+            const t0 = j / segCount;
+            const t1 = (j + 1) / segCount;
+            const u0 = 1 - t0, u1 = 1 - t1;
+            const ax0 = u0*u0*u0*u0 * sx + 4*u0*u0*u0*t0 * p1x + 6*u0*u0*t0*t0 * p2x + 4*u0*t0*t0*t0 * p3x + t0*t0*t0*t0 * tx;
+            const ay0 = u0*u0*u0*u0 * sy + 4*u0*u0*u0*t0 * p1y + 6*u0*u0*t0*t0 * p2y + 4*u0*t0*t0*t0 * p3y + t0*t0*t0*t0 * ty;
+            const ax1 = u1*u1*u1*u1 * sx + 4*u1*u1*u1*t1 * p1x + 6*u1*u1*t1*t1 * p2x + 4*u1*t1*t1*t1 * p3x + t1*t1*t1*t1 * tx;
+            const ay1 = u1*u1*u1*u1 * sy + 4*u1*u1*u1*t1 * p1y + 6*u1*u1*t1*t1 * p2y + 4*u1*t1*t1*t1 * p3y + t1*t1*t1*t1 * ty;
+            // 写回当前分段坐标
+            arr[(i - 1) * stride + 0] = ax0;
+            arr[(i - 1) * stride + 1] = ay0;
+            arr[(i - 1) * stride + 6] = ax1;
+            arr[(i - 1) * stride + 7] = ay1;
+        }
+    }
 }
 
 function mini_EdgeMoveById(id, arr, stride, selectedOffset, [shiftX, shiftY]) {
     const strColorId = id.join(",");
-    const decodeColor = decodeColorToIdFloat(...id);
-    for (const value of DataManager.adjGraph.get(strColorId)) {
-        let i = value + 1; // +1 因为数据从 1 开始
+    const movedId = decodeColorToIdFloat(...id);
+    const indices = Array.from(DataManager.adjGraph.get(strColorId) ?? []);
+    if (indices.length === 0) return;
 
-        let [rSource, gSource, bSource] = [arr[i * stride + selectedOffset - 9], arr[i * stride + selectedOffset - 8], arr[i * stride + selectedOffset - 7]]
-        let [rTarget, gTarget, bTarget] = [arr[i * stride + selectedOffset - 3], arr[i * stride + selectedOffset - 2], arr[i * stride + selectedOffset - 1]]
-        const sourceId = decodeColorToIdFloat(rSource, gSource, bSource);
-        const targetId = decodeColorToIdFloat(rTarget, gTarget, bTarget);
-
-        if (sourceId === decodeColor) {
-            arr[(i - 1) * stride] += shiftX
-            arr[(i - 1) * stride + 1] += shiftY
-        }
-        if (targetId === decodeColor) {
-            arr[(i - 1) * stride + 6] += shiftX
-            arr[(i - 1) * stride + 7] += shiftY
-        }
+    const groups = new Map(); // otherIdStr -> {idxList: number[], sourceIsMoved: boolean}
+    for (const value of indices) {
+        const i = value + 1;
+        const rS = arr[i * stride + selectedOffset - 9];
+        const gS = arr[i * stride + selectedOffset - 8];
+        const bS = arr[i * stride + selectedOffset - 7];
+        const rT = arr[i * stride + selectedOffset - 3];
+        const gT = arr[i * stride + selectedOffset - 2];
+        const bT = arr[i * stride + selectedOffset - 1];
+        const sId = decodeColorToIdFloat(rS, gS, bS);
+        const tId = decodeColorToIdFloat(rT, gT, bT);
+        const sourceIsMoved = (sId === movedId);
+        const otherStr = [sourceIsMoved ? rT : rS, sourceIsMoved ? gT : gS, sourceIsMoved ? bT : bS].join(",");
+        const g = groups.get(otherStr) ?? { idxList: [], sourceIsMoved };
+        g.idxList.push(value);
+        g.sourceIsMoved = sourceIsMoved;
+        groups.set(otherStr, g);
     }
 
+    const alphaX = (STYLE.edgeCurveOffsetRatioX ?? 0.25);
+    const alphaY = (STYLE.edgeCurveOffsetRatioY ?? 0.25);
 
+    for (const [_, g] of groups.entries()) {
+        const idxList = g.idxList.sort((a, b) => a - b);
+        const segCount = idxList.length;
+        if (segCount === 0) continue;
+        const startI = idxList[0] + 1;
+        const endI = idxList[segCount - 1] + 1;
+        let csx = arr[(startI - 1) * stride + 0];
+        let csy = arr[(startI - 1) * stride + 1];
+        let ctx = arr[(endI - 1) * stride + 6];
+        let cty = arr[(endI - 1) * stride + 7];
+        if (g.sourceIsMoved) { csx += shiftX; csy += shiftY; } else { ctx += shiftX; cty += shiftY; }
+        const cmidx = (csx + ctx) * 0.5;
+        const cmidy = (csy + cty) * 0.5;
+        const cp1x = ctx * (1 - alphaX) + cmidx * alphaX;
+        const cp1y = csy * (1 - alphaY) + cmidy * alphaY;
+        const cp2x = cmidx, cp2y = cmidy;
+        const cp3x = csx * (1 - alphaX) + cmidx * alphaX;
+        const cp3y = cty * (1 - alphaY) + cmidy * alphaY;
+
+        for (let j = 0; j < segCount; j++) {
+            const value = idxList[j];
+            const i = value + 1;
+            const t0 = j / segCount;
+            const t1 = (j + 1) / segCount;
+            const cx0 = (1 - t0)**4 * csx + 4*(1 - t0)**3 * t0 * cp1x + 6*(1 - t0)**2 * t0**2 * cp2x + 4*(1 - t0) * t0**3 * cp3x + t0**4 * ctx;
+            const cy0 = (1 - t0)**4 * csy + 4*(1 - t0)**3 * t0 * cp1y + 6*(1 - t0)**2 * t0**2 * cp2y + 4*(1 - t0) * t0**3 * cp3y + t0**4 * cty;
+            const cx1 = (1 - t1)**4 * csx + 4*(1 - t1)**3 * t1 * cp1x + 6*(1 - t1)**2 * t1**2 * cp2x + 4*(1 - t1) * t1**3 * cp3x + t1**4 * ctx;
+            const cy1 = (1 - t1)**4 * csy + 4*(1 - t1)**3 * t1 * cp1y + 6*(1 - t1)**2 * t1**2 * cp2y + 4*(1 - t1) * t1**3 * cp3y + t1**4 * cty;
+            arr[(i - 1) * stride + 0] = cx0;
+            arr[(i - 1) * stride + 1] = cy0;
+            arr[(i - 1) * stride + 6] = cx1;
+            arr[(i - 1) * stride + 7] = cy1;
+        }
+    }
 }
 
 function createNDCMapperWithSize(bounds, margin = 0.05) {
